@@ -1,0 +1,1676 @@
+import math
+from collections import deque
+import numpy as np
+from typing import Optional
+
+try:
+    from numba import njit
+    NUMBA_AVAILABLE = True
+except ImportError:
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator if not args else decorator(args[0])
+    NUMBA_AVAILABLE = False
+
+BOARD_WIDTH = 10
+BOARD_HEIGHT = 40
+VISIBLE_HEIGHT = 20
+HIDDEN_ROWS = BOARD_HEIGHT - VISIBLE_HEIGHT
+GARBAGE_ID = -1
+OPENER_PHASE_PIECES = 14
+SPAWN_X = 3
+SPAWN_Y = max(0, HIDDEN_ROWS - 2)
+
+PIECE_ID_TO_KIND = {
+    1: "I", 2: "O", 3: "T", 4: "S", 5: "Z", 6: "J", 7: "L",
+}
+KIND_TO_PIECE_ID = {v: k for k, v in PIECE_ID_TO_KIND.items()}
+
+PIECE_DEFS = {
+    "I": {"size": 4, "blocks": [(0, 1), (1, 1), (2, 1), (3, 1)]},
+
+    "O": {"size": 4, "blocks": [(1, 1), (2, 1), (1, 2), (2, 2)]},
+
+    "T": {"size": 3, "blocks": [(1, 0), (0, 1), (1, 1), (2, 1)]},
+
+    "S": {"size": 3, "blocks": [(1, 0), (2, 0), (0, 1), (1, 1)]},
+
+    "Z": {"size": 3, "blocks": [(0, 0), (1, 0), (1, 1), (2, 1)]},
+
+    "J": {"size": 3, "blocks": [(0, 0), (0, 1), (1, 1), (2, 1)]},
+
+    "L": {"size": 3, "blocks": [(2, 0), (0, 1), (1, 1), (2, 1)]},
+}
+
+JLSTZ_OFFSETS = {
+    0: [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
+    1: [(0, 0), (1, 0), (1, -1), (0, 2), (1, 2)],
+    2: [(0, 0), (0, 0), (0, 0), (0, 0), (0, 0)],
+    3: [(0, 0), (-1, 0), (-1, -1), (0, 2), (-1, 2)],
+}
+
+I_OFFSETS = {
+    0: [(0, 0), (-1, 0), (2, 0), (-1, 0), (2, 0)],
+    1: [(-1, 0), (0, 0), (0, 0), (0, 1), (0, -2)],
+    2: [(-1, 1), (1, 1), (-2, 1), (1, 0), (-2, 0)],
+    3: [(1, 0), (0, 0), (0, 0), (0, 1), (0, -2)],
+}
+
+O_OFFSETS = {
+    0: [(0, 0)], 1: [(0, 0)], 2: [(0, 0)], 3: [(0, 0)]
+}
+
+KICKS_180_NS = [
+    (0, 0), (0, 1), (1, 1), (-1, 1), (0, -1)
+]
+KICKS_180_EW = [
+    (0, 0), (1, 0), (1, 2), (1, 1), (0, 2)
+]
+
+JLSTZ_OFFSETS_ARR = np.array(
+    [JLSTZ_OFFSETS[0], JLSTZ_OFFSETS[1], JLSTZ_OFFSETS[2], JLSTZ_OFFSETS[3]],
+    dtype=np.int8,
+)
+I_OFFSETS_ARR = np.array(
+    [I_OFFSETS[0], I_OFFSETS[1], I_OFFSETS[2], I_OFFSETS[3]],
+    dtype=np.int8,
+)
+O_OFFSETS_ARR = np.array(
+    [O_OFFSETS[0], O_OFFSETS[1], O_OFFSETS[2], O_OFFSETS[3]],
+    dtype=np.int8,
+)
+KICKS_180_NS_ARR = np.array(KICKS_180_NS, dtype=np.int8)
+KICKS_180_EW_ARR = np.array(KICKS_180_EW, dtype=np.int8)
+ROTATION_NAMES = ["N", "E", "S", "W"]
+
+
+def _rotate_coords(coords, size, direction):
+    """
+    Rotates coordinates around the center.
+    System: Y-Axis is DOWN.
+    Direction: 1 = CW, -1 = CCW, 2 = 180
+    """
+    center = (size - 1) / 2.0
+    rotated = []
+    for x, y in coords:
+        dx = x - center
+        dy = y - center
+
+        # Matrix Rotation for Y-Down System
+        if direction == 1:       # CW: x' = -y, y' = x
+            rx, ry = -dy, dx
+        elif direction == -1:    # CCW: x' = y, y' = -x
+            rx, ry = dy, -dx
+        elif direction in (2, -2): # 180: x' = -x, y' = -y
+            rx, ry = -dx, -dy
+        else:
+            raise ValueError(f"Invalid dir: {direction}")
+
+        rotated.append((int(round(center + rx)), int(round(center + ry))))
+    return rotated
+
+
+def _build_rotation_states():
+    states = {}
+    for kind, definition in PIECE_DEFS.items():
+        size = definition["size"]
+        coords = definition["blocks"]
+        # Convert to tuples for faster hashing and immutability
+        rotations = [tuple(coords)]
+        curr = coords
+        for _ in range(3):
+            curr = _rotate_coords(curr, size, 1)
+            rotations.append(tuple(curr))
+        states[kind] = rotations
+    return states
+
+PIECE_ROTATIONS = _build_rotation_states()
+
+# Precompute rotation states as numpy arrays for faster block calculations
+PIECE_ROTATIONS_NP = {}
+for kind, rotations in PIECE_ROTATIONS.items():
+    PIECE_ROTATIONS_NP[kind] = [np.array(rot, dtype=np.int16) for rot in rotations]
+
+PIECE_ROTATIONS_NP_STACKED = {
+    kind: np.stack(rotations, axis=0) for kind, rotations in PIECE_ROTATIONS_NP.items()
+}
+
+@njit(cache=True)
+def _check_collision_raw(board, shape_offsets, px, py):
+    """
+    Checks collision without creating new arrays.
+    shape_offsets: The precomputed (0,0) based offsets for the piece's rotation.
+    px, py: The top-left position of the piece.
+    """
+    for i in range(len(shape_offsets)):
+        # Calculate global position
+        nx = shape_offsets[i, 0] + px
+        ny = shape_offsets[i, 1] + py
+
+        # Bounds check
+        if nx < 0 or nx >= BOARD_WIDTH or ny < 0 or ny >= BOARD_HEIGHT:
+            return True # Collision/OOB
+
+        # Board check
+        if board[ny, nx] != 0:
+            return True # Collision
+
+    return False
+
+
+@njit(cache=True)
+def _bfs_core(
+    board,
+    shapes,
+    kick_table,
+    kicks_180_ns,
+    kicks_180_ew,
+    include_180,
+    start_x,
+    start_y,
+    start_rot,
+    last_was_rot,
+    last_rot_dir,
+    last_kick_index,
+    piece_is_o,
+):
+    height = board.shape[0]
+    width = board.shape[1]
+    max_states = height * width * 4
+
+    visited = np.zeros((height, width, 4), dtype=np.uint8)
+    qx = np.empty(max_states, dtype=np.int16)
+    qy = np.empty(max_states, dtype=np.int16)
+    qr = np.empty(max_states, dtype=np.int8)
+    q_last_was = np.empty(max_states, dtype=np.uint8)
+    q_last_dir = np.empty(max_states, dtype=np.int8)
+    q_last_kick = np.empty(max_states, dtype=np.int8)
+
+    rx = np.empty(max_states, dtype=np.int16)
+    ry = np.empty(max_states, dtype=np.int16)
+    rr = np.empty(max_states, dtype=np.int8)
+    r_last_was = np.empty(max_states, dtype=np.uint8)
+    r_last_dir = np.empty(max_states, dtype=np.int8)
+    r_last_kick = np.empty(max_states, dtype=np.int8)
+
+    head = 0
+    tail = 0
+
+    if start_x < 0 or start_x >= width or start_y < 0 or start_y >= height:
+        return 0, rx, ry, rr, r_last_was, r_last_dir, r_last_kick
+
+    visited[start_y, start_x, start_rot] = 1
+    qx[tail] = start_x
+    qy[tail] = start_y
+    qr[tail] = start_rot
+    q_last_was[tail] = 1 if last_was_rot else 0
+    q_last_dir[tail] = last_rot_dir
+    q_last_kick[tail] = last_kick_index
+    tail += 1
+
+    result_count = 0
+
+    while head < tail:
+        px = qx[head]
+        py = qy[head]
+        pr = qr[head]
+        last_was = q_last_was[head]
+        last_dir = q_last_dir[head]
+        last_kick = q_last_kick[head]
+        head += 1
+
+        current_shape = shapes[pr]
+
+        if _check_collision_raw(board, current_shape, px, py + 1):
+            rx[result_count] = px
+            ry[result_count] = py
+            rr[result_count] = pr
+            r_last_was[result_count] = last_was
+            r_last_dir[result_count] = last_dir
+            r_last_kick[result_count] = last_kick
+            result_count += 1
+
+        # Moves: Left, Right, Down
+        for dx, dy in ((-1, 0), (1, 0), (0, 1)):
+            nx = px + dx
+            ny = py + dy
+            if _check_collision_raw(board, current_shape, nx, ny):
+                continue
+            if visited[ny, nx, pr] == 1:
+                continue
+            visited[ny, nx, pr] = 1
+            qx[tail] = nx
+            qy[tail] = ny
+            qr[tail] = pr
+            q_last_was[tail] = 0
+            q_last_dir[tail] = 0
+            q_last_kick[tail] = -1
+            tail += 1
+
+        # Rotations: CCW, CW, 180 (optional)
+        for rot_dir in (-1, 1):
+            new_r = (pr + rot_dir) & 3
+            new_shape = shapes[new_r]
+
+            success = False
+            final_nx = px
+            final_ny = py
+            final_kick_idx = 0
+
+            if piece_is_o == 1:
+                if not _check_collision_raw(board, new_shape, px, py):
+                    success = True
+            else:
+                for k_idx in range(5):
+                    ox = kick_table[pr, k_idx, 0]
+                    oy = kick_table[pr, k_idx, 1]
+                    nx_off = kick_table[new_r, k_idx, 0]
+                    ny_off = kick_table[new_r, k_idx, 1]
+                    kx = ox - nx_off
+                    ky = oy - ny_off
+                    tx = px + kx
+                    ty = py - ky
+                    if not _check_collision_raw(board, new_shape, tx, ty):
+                        final_nx = tx
+                        final_ny = ty
+                        final_kick_idx = k_idx
+                        success = True
+                        break
+
+            if success and visited[final_ny, final_nx, new_r] == 0:
+                visited[final_ny, final_nx, new_r] = 1
+                qx[tail] = final_nx
+                qy[tail] = final_ny
+                qr[tail] = new_r
+                q_last_was[tail] = 1
+                q_last_dir[tail] = rot_dir
+                q_last_kick[tail] = final_kick_idx
+                tail += 1
+
+        if include_180:
+            rot_dir = 2
+            new_r = (pr + rot_dir) & 3
+            new_shape = shapes[new_r]
+
+            kicks = kicks_180_ns if (pr & 1) == 0 else kicks_180_ew
+            success = False
+            final_nx = px
+            final_ny = py
+            final_kick_idx = 0
+
+            for k_idx in range(kicks.shape[0]):
+                kx = kicks[k_idx, 0]
+                ky = kicks[k_idx, 1]
+                tx = px + kx
+                ty = py - ky
+                if not _check_collision_raw(board, new_shape, tx, ty):
+                    final_nx = tx
+                    final_ny = ty
+                    final_kick_idx = k_idx
+                    success = True
+                    break
+
+            if success and visited[final_ny, final_nx, new_r] == 0:
+                visited[final_ny, final_nx, new_r] = 1
+                qx[tail] = final_nx
+                qy[tail] = final_ny
+                qr[tail] = new_r
+                q_last_was[tail] = 1
+                q_last_dir[tail] = rot_dir
+                q_last_kick[tail] = final_kick_idx
+                tail += 1
+
+    return result_count, rx, ry, rr, r_last_was, r_last_dir, r_last_kick
+@njit(cache=True)
+def _is_valid_fast(blocks, board):
+    for i in range(len(blocks)):
+        x, y = blocks[i, 0], blocks[i, 1]
+        # Check bounds
+        if x < 0 or x >= BOARD_WIDTH or y < 0 or y >= BOARD_HEIGHT:
+            return False
+        # Check collision
+        if board[y, x] != 0:
+            return False
+    return True
+
+
+@njit(cache=True)
+def _compute_blocks_fast(piece_blocks, ox, oy):
+    """Numba-compiled block position calculation."""
+    result = np.empty((len(piece_blocks), 2), dtype=np.int16)
+    for i in range(len(piece_blocks)):
+        result[i, 0] = piece_blocks[i, 0] + ox
+        result[i, 1] = piece_blocks[i, 1] + oy
+    return result
+
+
+def _normalize_rotation_direction(direction):
+    if direction in ("CW", "cw", 1):
+        return 1
+    if direction in ("CCW", "ccw", -1):
+        return -1
+    if direction in ("180", 2, -2):
+        return 2
+    return None
+
+
+def _resolve_piece_kind(kind):
+    if isinstance(kind, int):
+        return PIECE_ID_TO_KIND.get(kind, kind)
+    return kind
+
+
+def _resolve_piece_id(kind):
+    if isinstance(kind, int):
+        return kind
+    return KIND_TO_PIECE_ID.get(kind, 1)
+
+
+def _valid_blocks_mask(blocks):
+    return (
+        (blocks[:, 0] >= 0)
+        & (blocks[:, 0] < BOARD_WIDTH)
+        & (blocks[:, 1] >= 0)
+        & (blocks[:, 1] < BOARD_HEIGHT)
+    )
+
+
+def _place_blocks_on_board(board, blocks, piece_id):
+    valid_blocks = blocks[_valid_blocks_mask(blocks)]
+    if len(valid_blocks) > 0:
+        board[valid_blocks[:, 1], valid_blocks[:, 0]] = piece_id
+    return valid_blocks
+
+
+def _freeze_stats_value(value):
+    if isinstance(value, dict):
+        return tuple((k, _freeze_stats_value(value[k])) for k in sorted(value))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_stats_value(v) for v in value)
+    if isinstance(value, np.ndarray):
+        return tuple(_freeze_stats_value(v) for v in value.tolist())
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _dedupe_bfs_results(results):
+    unique = []
+    seen = {}
+    for result in results:
+        board = result.get("board")
+        stats = result.get("stats")
+        placement = result.get("placement")
+        if board is None:
+            unique.append(result)
+            continue
+        stats_key = _freeze_stats_value(stats)
+        key = (board.shape, board.dtype.str, board.tobytes(), stats_key)
+        existing = seen.get(key)
+        if existing is None:
+            if placement is not None:
+                result["placements"] = [placement]
+            else:
+                result["placements"] = []
+            seen[key] = result
+            unique.append(result)
+        else:
+            if placement is not None:
+                existing.setdefault("placements", []).append(placement)
+    return unique
+
+
+class Piece:
+    def __init__(self, kind, rotation=0, position=(0, 0)):
+        self.kind = _resolve_piece_kind(kind)
+        self.rotation = rotation % 4
+        self.position = position
+
+        self.last_action_was_rotation = False
+        self.last_rotation_dir: Optional[int] = None
+        self.last_kick_index: Optional[int] = None
+
+    def __str__(self):
+        return f"{self.kind} at {self.position} (Rot {self.rotation})"
+
+    def copy(self):
+        clone = Piece(self.kind, rotation=self.rotation, position=tuple(self.position))
+        clone.last_action_was_rotation = bool(self.last_action_was_rotation)
+        clone.last_rotation_dir = self.last_rotation_dir
+        clone.last_kick_index = self.last_kick_index
+        return clone
+
+
+class TetrisEngine:
+    def __init__(self, spin_mode: str = "t_only", rng=None):
+        if spin_mode not in {"t_only", "all_spin"}:
+            raise ValueError(f"Unsupported spin mode: {spin_mode}")
+        self.spin_mode = spin_mode
+        self.rng = rng
+        self.board = np.zeros((BOARD_HEIGHT, BOARD_WIDTH), dtype=int)
+        self.current_piece = None
+        self.bag = np.array([], dtype=int)
+        self.hold = None
+        self.bag_size = 0
+        self.b2b_chain = 0
+        self.surge_charge = 0
+        self.last_clear_stats = None
+        self.combo = 0
+        self.combo_active = False
+        self.game_over = False
+        self.game_over_reason = None
+        self.last_spawn_was_clutch = False
+        self.last_end_phase = None
+        self.pieces_placed = 0
+        self.total_lines_cleared = 0
+        self.total_attack_sent = 0
+        self.total_attack_canceled = 0
+        # Incoming garbage queue: list of {"lines": int, "timer": int, "col": int}
+        self.incoming_garbage: list = []
+        # Last garbage hole column (used for change-on-attack randomisation)
+        self.garbage_col: Optional[int] = None
+        self.generate_bag() # Ensure bag is ready on init
+
+    def reset(self):
+        self.board.fill(0)
+        self.current_piece = None
+        self.hold = None
+        self.bag = np.array([], dtype=int)
+        self.bag_size = 0
+        self.b2b_chain = 0
+        self.surge_charge = 0
+        self.last_clear_stats = None
+        self.combo = 0
+        self.combo_active = False
+        self.game_over = False
+        self.game_over_reason = None
+        self.last_spawn_was_clutch = False
+        self.last_end_phase = None
+        self.pieces_placed = 0
+        self.total_lines_cleared = 0
+        self.total_attack_sent = 0
+        self.total_attack_canceled = 0
+        self.incoming_garbage = []
+        self.garbage_col = None
+        self.generate_bag()
+
+    def _clone_rng(self):
+        rng = self.rng
+        if rng is None or rng is np.random:
+            return rng
+        bit_generator = getattr(rng, "bit_generator", None)
+        if bit_generator is None:
+            return rng
+        clone_bit_generator = bit_generator.__class__()
+        clone_bit_generator.state = bit_generator.state
+        return np.random.Generator(clone_bit_generator)
+
+    def clone(self):
+        clone = self.__class__.__new__(self.__class__)
+        clone.spin_mode = self.spin_mode
+        clone.rng = self._clone_rng()
+        clone.board = self.board.copy()
+        clone.current_piece = None if self.current_piece is None else self.current_piece.copy()
+        clone.bag = self.bag.copy()
+        clone.hold = self.hold
+        clone.bag_size = int(self.bag_size)
+        clone.b2b_chain = int(self.b2b_chain)
+        clone.surge_charge = int(self.surge_charge)
+        clone.last_clear_stats = None if self.last_clear_stats is None else dict(self.last_clear_stats)
+        clone.combo = int(self.combo)
+        clone.combo_active = bool(self.combo_active)
+        clone.game_over = bool(self.game_over)
+        clone.game_over_reason = self.game_over_reason
+        clone.last_spawn_was_clutch = bool(self.last_spawn_was_clutch)
+        clone.last_end_phase = None if self.last_end_phase is None else dict(self.last_end_phase)
+        clone.pieces_placed = int(self.pieces_placed)
+        clone.total_lines_cleared = int(self.total_lines_cleared)
+        clone.total_attack_sent = int(self.total_attack_sent)
+        clone.total_attack_canceled = int(self.total_attack_canceled)
+        clone.incoming_garbage = [dict(batch) for batch in self.incoming_garbage]
+        clone.garbage_col = self.garbage_col
+        return clone
+
+    def __deepcopy__(self, memo):
+        clone = self.clone()
+        memo[id(self)] = clone
+        return clone
+
+    def generate_bag(self):
+        # Standard 7-bag randomizer
+        if self.bag is None:
+            self.bag = np.array([], dtype=int)
+
+        # Ensure we have enough pieces
+        while len(self.bag) <= 14:
+            rng = self.rng if self.rng is not None else np.random
+            new_bag = rng.permutation(7) + 1
+            if len(self.bag) == 0:
+                self.bag = new_bag
+            else:
+                self.bag = np.concatenate((self.bag, new_bag))
+        self.bag_size = len(self.bag)
+        return self.bag
+
+    def print_piece_info(self):
+        # Console debug print
+        for row in self.board:
+            print(" ".join(str(x) for x in row))
+        print(f"Current Piece: {self.current_piece}")
+        print(f"Hold: {self.hold}")
+        print(f"Next: {[PIECE_ID_TO_KIND.get(x,x) for x in self.bag[:5]]}")
+
+    def _spawn_position_for(self, _kind=None):
+        return (SPAWN_X, SPAWN_Y)
+
+    def _pop_next_piece_id(self):
+        self.generate_bag()
+        piece_id = int(self.bag[0])
+        self.bag = self.bag[1:]
+        self.bag_size = len(self.bag)
+        if self.bag_size <= 14:
+            self.generate_bag()
+        return piece_id
+
+    def spawn_piece(self, kind, position=None, rotation=0):
+        if position is None:
+            position = self._spawn_position_for(kind)
+        piece = Piece(kind, rotation=rotation, position=position)
+        self.current_piece = piece
+        return piece
+
+    def _find_clutch_spawn(self, piece, position):
+        x, y = position
+        for ny in range(y - 1, -1, -1):
+            if self.is_position_valid(piece, (x, ny)):
+                return (x, ny)
+        return None
+
+    def spawn_next(self, allow_clutch=False):
+        if self.game_over:
+            return False
+
+        piece_id = self._pop_next_piece_id()
+        spawn_pos = self._spawn_position_for(piece_id)
+        piece = Piece(piece_id, rotation=0, position=spawn_pos)
+
+        self.last_spawn_was_clutch = False
+
+        if self.is_position_valid(piece, spawn_pos, rotation=0):
+            self.current_piece = piece
+            return True
+
+        if allow_clutch:
+            clutch_pos = self._find_clutch_spawn(piece, spawn_pos)
+            if clutch_pos is not None:
+                piece.position = clutch_pos
+                self.current_piece = piece
+                self.last_spawn_was_clutch = True
+                return True
+
+        self.current_piece = None
+        self.game_over = True
+        self.game_over_reason = "block_out"
+        return False
+
+    # ------------------------------------------------------------------ #
+    #  Board And Movement Helpers                                         #
+    # ------------------------------------------------------------------ #
+
+    def _shape_for(self, piece, rotation=None):
+        if rotation is None:
+            rotation = piece.rotation
+        return PIECE_ROTATIONS[_resolve_piece_kind(piece.kind)][rotation]
+
+    def piece_blocks(self, piece, position=None, rotation=None):
+        """Returns global coordinates of the piece's blocks."""
+        if position is None:
+            position = piece.position
+        if rotation is None:
+            rotation = piece.rotation
+
+        # Use Numba-compiled fast path when available
+        blocks_np = PIECE_ROTATIONS_NP[_resolve_piece_kind(piece.kind)][rotation]
+        ox, oy = position
+        if NUMBA_AVAILABLE:
+            return _compute_blocks_fast(blocks_np, ox, oy)
+        return blocks_np + np.array([ox, oy], dtype=np.int16)
+
+    def _cell_blocked(self, x, y):
+        """Checks bounds and collision."""
+        if x < 0 or x >= BOARD_WIDTH or y < 0 or y >= BOARD_HEIGHT:
+            return True
+        return self.board[y][x] != 0
+
+    def is_position_valid(self, piece, position=None, rotation=None):
+        blocks = self.piece_blocks(piece, position, rotation)
+        # Use Numba-compiled fast path when available
+        if NUMBA_AVAILABLE:
+            return _is_valid_fast(blocks, self.board)
+        # Fallback: vectorized numpy operations
+        valid_mask = _valid_blocks_mask(blocks)
+        if not np.all(valid_mask):
+            return False
+        # Check collisions using fancy indexing (much faster)
+        return not np.any(self.board[blocks[:, 1], blocks[:, 0]] != 0)
+
+    def _kick_table_for(self, piece):
+        kind = _resolve_piece_kind(piece.kind)
+        if kind == "I":
+            return I_OFFSETS
+        if kind == "O":
+            return O_OFFSETS
+        return JLSTZ_OFFSETS
+
+    def _rotation_candidates(self, kind, old_state, new_state, delta):
+        kind = _resolve_piece_kind(kind)
+        if abs(delta) == 2:
+            kicks = KICKS_180_NS if old_state % 2 == 0 else KICKS_180_EW
+            return [(idx, kick[0], kick[1]) for idx, kick in enumerate(kicks)]
+        if kind == "O":
+            return [(0, 0, 0)]
+
+        offsets = self._kick_table_for(Piece(kind, rotation=old_state))
+        candidates = []
+        for kick_idx in range(5):
+            ox, oy = offsets[old_state][kick_idx]
+            nx, ny = offsets[new_state][kick_idx]
+            candidates.append((kick_idx, ox - nx, oy - ny))
+        return candidates
+
+    def _try_rotate_piece(self, piece, new_state, delta, kick_idx, kick_x, kick_y):
+        cx = piece.position[0] + kick_x
+        cy = piece.position[1] - kick_y
+
+        if not self.is_position_valid(piece, (cx, cy), new_state):
+            return False
+
+        piece.position = (cx, cy)
+        piece.rotation = new_state
+        piece.last_action_was_rotation = True
+        piece.last_rotation_dir = delta
+        piece.last_kick_index = kick_idx
+        return True
+
+    def rotate_piece(self, piece, direction):
+        delta = _normalize_rotation_direction(direction)
+        if delta is None:
+            return False
+
+        old_state = piece.rotation
+        new_state = (old_state + delta) % 4
+        piece.last_action_was_rotation = False
+
+        if abs(delta) != 2 and _resolve_piece_kind(piece.kind) == "O":
+            piece.rotation = new_state
+            return True
+
+        for kick_idx, kick_x, kick_y in self._rotation_candidates(
+            piece.kind, old_state, new_state, delta
+        ):
+            if self._try_rotate_piece(piece, new_state, delta, kick_idx, kick_x, kick_y):
+                return True
+        return False
+
+    def rotate_current(self, direction):
+        if self.current_piece is None:
+            return False
+        return self.rotate_piece(self.current_piece, direction)
+
+    # ------------------------------------------------------------------ #
+    #  Attack And Scoring Helpers                                         #
+    # ------------------------------------------------------------------ #
+
+    def classify_clear(self, cleared_lines, spin_result):
+        """Classify a clear without mutating engine state."""
+        cleared_lines = int(cleared_lines)
+        spin = spin_result if isinstance(spin_result, dict) else None
+        is_spin = spin is not None
+        spin_type = 0
+        if is_spin:
+            spin_type = 1 if bool(spin.get("is_mini")) else 2
+        difficult = self._is_difficult_clear(cleared_lines, spin)
+        return {
+            "lines_cleared": cleared_lines,
+            "spin": spin,
+            "is_spin": is_spin,
+            "spin_type": spin_type,
+            "is_mini": bool(spin.get("is_mini")) if is_spin else False,
+            "is_difficult": bool(difficult),
+            "qualifies_b2b": bool(difficult and cleared_lines > 0),
+            "breaks_b2b": bool(cleared_lines > 0 and not difficult),
+        }
+
+    def _b2b_bonus_for_chain(self, chain_len):
+        # The dataset's attack values line up when B2B bonus is applied
+        # to the displayed chain (chain_len - 1), not the raw chain_len.
+        effective = max(0, chain_len - 1)
+        if effective <= 1:
+            return 0
+        if effective <= 2:
+            return 1
+        if effective <= 7:
+            return 2
+        if effective <= 23:
+            return 3
+        if effective <= 66:
+            return 4
+        if effective <= 184:
+            return 5
+        if effective <= 503:
+            return 6
+        if effective <= 1369:
+            return 7
+        return 8
+
+    def _is_difficult_clear(self, cleared_lines, spin_result):
+        if cleared_lines <= 0:
+            return False
+        if cleared_lines == 4:
+            return True
+        # All-Mini+ ruleset: any spin (including mini) is difficult and
+        # continues / increments the B2B chain. Singles/Doubles/Triples
+        # without a spin are NOT difficult and break the chain.
+        if spin_result is not None:
+            return True
+        return False
+
+    def _update_b2b_and_surge(self, cleared_lines, difficult, b2b_chain, surge_charge):
+        """Returns (b2b_chain, surge_charge, b2b_bonus, surge_send).
+
+        Rules (All-Mini+ Tetra League, Feb 2026):
+        - Difficult clear (Quad / any Spin incl. Mini): increments b2b_chain,
+          computes the log-ladder b2b_bonus, and updates surge_charge.
+        - Non-difficult clear (Single/Double/Triple without spin): BREAKS the
+          chain — stored surge fires immediately, then both counters reset to 0.
+        - No clear (cleared_lines == 0): everything stays unchanged.
+
+        surge_charge tracks total stored lines.  Per mechanics.md:
+          "8 B2B streak → 8 lines charged" and "Starts at 4 lines (at streak 4)".
+          Therefore surge_charge = b2b_display (= b2b_chain - 1) once that
+          display value >= 4, else 0.
+        """
+        b2b_bonus = 0
+        surge_send = 0
+
+        if cleared_lines <= 0:
+            return b2b_chain, surge_charge, b2b_bonus, surge_send
+
+        if difficult:
+            b2b_chain += 1
+            b2b_bonus = self._b2b_bonus_for_chain(b2b_chain)
+            b2b_display = b2b_chain - 1
+            # Surge starts charging once b2b_display reaches 4, and equals
+            # the display value from that point onward.
+            surge_charge = b2b_display if b2b_display >= 4 else 0
+        else:
+            # Chain breaks: release all stored surge lines on this clear.
+            surge_send = surge_charge
+            b2b_chain = 0
+            surge_charge = 0
+
+        return b2b_chain, surge_charge, b2b_bonus, surge_send
+
+    def _surge_segments(self, total):
+        if total <= 0:
+            return []
+        base = total // 3
+        rem = total % 3
+        seg1 = base + (1 if rem > 0 else 0)
+        seg2 = base + (1 if rem > 1 else 0)
+        seg3 = base
+        return [seg1, seg2, seg3]
+
+    def _base_attack_for_clear(self, cleared_lines, spin_result, board_after_clear):
+        if cleared_lines <= 0:
+            return 0, False
+
+        perfect_clear = bool(np.all(board_after_clear == 0))
+        if perfect_clear:
+            return 10, True
+
+        if spin_result is not None and spin_result.get("spin_type") == "t-spin":
+            is_mini = bool(spin_result.get("is_mini"))
+            if is_mini:
+                if cleared_lines == 1:
+                    return 0, False
+                if cleared_lines == 2:
+                    return 1, False
+            else:
+                if cleared_lines == 1:
+                    return 2, False
+                if cleared_lines == 2:
+                    return 4, False
+                if cleared_lines == 3:
+                    return 6, False
+
+        if cleared_lines == 1:
+            return 0, False
+        if cleared_lines == 2:
+            return 1, False
+        if cleared_lines == 3:
+            return 2, False
+        if cleared_lines == 4:
+            return 4, False
+
+        return 0, False
+
+    def _resolve_attack_context(
+        self,
+        *,
+        combo=None,
+        combo_active=None,
+        b2b_chain=None,
+        surge_charge=None,
+    ):
+        if combo is None:
+            combo = self.combo
+        if combo_active is None:
+            combo_active = self.combo_active
+        if b2b_chain is None:
+            b2b_chain = self.b2b_chain
+        if surge_charge is None:
+            surge_charge = self.surge_charge
+        return int(combo), bool(combo_active), int(b2b_chain), int(surge_charge)
+
+    def _build_attack_stats(
+        self,
+        *,
+        classification,
+        perfect_clear,
+        combo,
+        combo_active,
+        b2b_chain,
+        b2b_bonus,
+        surge_charge,
+        surge_send,
+        base_attack,
+        combo_attack,
+        combo_bonus,
+        combo_multiplier,
+        attack_total,
+    ):
+        return {
+            **classification,
+            "perfect_clear": bool(perfect_clear),
+            "combo": int(combo),
+            "combo_active": bool(combo_active),
+            "b2b_chain": int(b2b_chain),
+            "b2b_display": max(0, int(b2b_chain) - 1) if classification["qualifies_b2b"] else 0,
+            "b2b_bonus": int(b2b_bonus),
+            "surge_charge": int(surge_charge),
+            "surge_send": int(surge_send),
+            "surge_segments": self._surge_segments(int(surge_send)),
+            "base_attack": int(base_attack) if base_attack is not None else None,
+            "combo_attack": combo_attack,
+            "combo_bonus": combo_bonus,
+            "combo_multiplier": combo_multiplier,
+            "attack": attack_total,
+        }
+
+    def compute_attack_for_clear(
+        self,
+        cleared_lines,
+        spin_result,
+        *,
+        board_after_clear,
+        combo=None,
+        combo_active=None,
+        b2b_chain=None,
+        surge_charge=None,
+        base_attack=None,
+    ):
+        """Compute attack-related post-clear stats without mutating engine state."""
+        combo, combo_active, b2b_chain, surge_charge = self._resolve_attack_context(
+            combo=combo,
+            combo_active=combo_active,
+            b2b_chain=b2b_chain,
+            surge_charge=surge_charge,
+        )
+        classification = self.classify_clear(cleared_lines, spin_result)
+        computed_base_attack, perfect_clear = self._base_attack_for_clear(
+            int(cleared_lines), spin_result, board_after_clear
+        )
+        if base_attack is None:
+            base_attack = computed_base_attack
+
+        next_combo, next_combo_active = self._combo_after_clear(
+            int(cleared_lines), int(combo), bool(combo_active)
+        )
+        next_b2b_chain, next_surge_charge, b2b_bonus, surge_send = self._update_b2b_and_surge(
+            int(cleared_lines),
+            bool(classification["is_difficult"]),
+            int(b2b_chain),
+            int(surge_charge),
+        )
+
+        combo_attack = None
+        combo_bonus = None
+        combo_multiplier = None
+        attack_total = None
+        if base_attack is not None:
+            combo_attack = self.combo_attack_down(base_attack, combo=next_combo)
+            combo_bonus = combo_attack - base_attack
+            combo_multiplier = 1.0 + 0.25 * next_combo if base_attack > 0 else None
+            attack_total = combo_attack + b2b_bonus + surge_send
+
+        return self._build_attack_stats(
+            classification=classification,
+            perfect_clear=perfect_clear,
+            combo=next_combo,
+            combo_active=next_combo_active,
+            b2b_chain=next_b2b_chain,
+            b2b_bonus=b2b_bonus,
+            surge_charge=next_surge_charge,
+            surge_send=surge_send,
+            base_attack=base_attack,
+            combo_attack=combo_attack,
+            combo_bonus=combo_bonus,
+            combo_multiplier=combo_multiplier,
+            attack_total=attack_total,
+        )
+
+    def _update_combo(self, cleared_lines):
+        self.combo, self.combo_active = self._combo_after_clear(
+            cleared_lines, self.combo, self.combo_active
+        )
+        return self.combo
+
+    def _combo_after_clear(self, cleared_lines, combo, combo_active):
+        if cleared_lines <= 0:
+            return 0, False
+        if combo_active:
+            return combo + 1, True
+        return 0, True
+
+    def combo_attack_down(self, base_attack, combo=None):
+        if combo is None:
+            combo = self.combo
+        if base_attack > 0:
+            value = base_attack * (1.0 + 0.25 * combo)
+        else:
+            if combo >= 2:
+                value = math.log(1.0 + 1.25 * combo)
+            else:
+                value = 0.0
+        return int(math.floor(value))
+
+    def _clear_lines_on_board(self, board):
+        full_rows = np.where(np.all(board != 0, axis=1))[0]
+        if full_rows.size == 0:
+            return board, 0
+        new_board = np.delete(board, full_rows, axis=0)
+        new_rows = np.zeros((len(full_rows), BOARD_WIDTH), dtype=board.dtype)
+        new_board = np.vstack((new_rows, new_board))
+        return new_board, int(full_rows.size)
+
+    # ------------------------------------------------------------------ #
+    #  Placement Simulation And Locking                                   #
+    # ------------------------------------------------------------------ #
+
+    def _copy_board_with_piece_locked(self, piece):
+        board = self.board.copy()
+        blocks = self.piece_blocks(piece)
+        _place_blocks_on_board(board, blocks, _resolve_piece_id(piece.kind))
+        return board, blocks
+
+    def _augment_lock_stats(self, stats, spin_result):
+        t_spin_flag = "N"
+        if spin_result is not None:
+            t_spin_flag = "M" if spin_result.get("is_mini") else "F"
+        stats["t_spin"] = t_spin_flag
+        stats["garbage_cleared"] = 0
+        stats["immediate_garbage"] = 0
+        return stats
+
+    def _apply_lock_stats(self, cleared, stats):
+        self.last_clear_stats = stats
+        self.combo = int(stats["combo"])
+        self.combo_active = bool(stats["combo_active"])
+        self.b2b_chain = int(stats["b2b_chain"])
+        self.surge_charge = int(stats["surge_charge"])
+        self.pieces_placed += 1
+        self.total_lines_cleared += int(cleared)
+        self.total_attack_sent += int(stats.get("attack") or 0)
+
+    def _simulate_lock(self, piece, b2b_chain=None, combo=None, combo_active=None, base_attack=None, surge_charge=None):
+        combo, combo_active, b2b_chain, surge_charge = self._resolve_attack_context(
+            combo=combo,
+            combo_active=combo_active,
+            b2b_chain=b2b_chain,
+            surge_charge=surge_charge,
+        )
+        spin_result = self.detect_spin(piece)
+        board, _ = self._copy_board_with_piece_locked(piece)
+        board, cleared = self._clear_lines_on_board(board)
+        stats = self.compute_attack_for_clear(
+            cleared,
+            spin_result,
+            board_after_clear=board,
+            combo=combo,
+            combo_active=combo_active,
+            b2b_chain=b2b_chain,
+            surge_charge=surge_charge,
+            base_attack=base_attack,
+        )
+        return board, self._augment_lock_stats(stats, spin_result)
+
+    def predict_post_lock_stats(self, piece, *, base_attack=None):
+        """Return a simulated post-lock payload for ``piece`` without mutating the engine."""
+        board_after, stats = self._simulate_lock(piece, base_attack=base_attack)
+        blocks = self.piece_blocks(piece)
+        return {
+            "board": board_after,
+            "stats": stats,
+            "blocks": blocks.copy(),
+            "placement": {
+                "x": int(piece.position[0]),
+                "y": int(piece.position[1]),
+                "rotation": int(piece.rotation),
+                "kind": piece.kind,
+                "last_was_rot": bool(piece.last_action_was_rotation),
+                "last_rot_dir": piece.last_rotation_dir,
+                "last_kick_idx": piece.last_kick_index,
+            },
+        }
+
+    def _empty_bfs_results(self, include_no_place):
+        if not include_no_place:
+            return []
+        return [{
+            "board": self.board.copy(),
+            "stats": None,
+            "placement": {"skip": True},
+        }]
+
+    def _bfs_inputs_for_piece(self, piece):
+        kind = _resolve_piece_kind(piece.kind)
+        if kind == "I":
+            kick_table = I_OFFSETS
+            kick_table_arr = I_OFFSETS_ARR
+        elif kind == "O":
+            kick_table = O_OFFSETS
+            kick_table_arr = O_OFFSETS_ARR
+        else:
+            kick_table = JLSTZ_OFFSETS
+            kick_table_arr = JLSTZ_OFFSETS_ARR
+
+        return {
+            "kind": kind,
+            "start_x": piece.position[0],
+            "start_y": piece.position[1],
+            "start_rot": piece.rotation,
+            "kick_table": kick_table,
+            "kick_table_arr": kick_table_arr,
+            "shapes": PIECE_ROTATIONS_NP[kind],
+            "shapes_arr": PIECE_ROTATIONS_NP_STACKED[kind],
+            "piece_is_o": 1 if kind == "O" else 0,
+            "last_rot_dir": 0 if piece.last_rotation_dir is None else int(piece.last_rotation_dir),
+            "last_kick_idx": -1 if piece.last_kick_index is None else int(piece.last_kick_index),
+        }
+
+    def _placement_payload(self, kind, px, py, pr, last_was_rot, last_dir, last_kick):
+        return {
+            "x": int(px),
+            "y": int(py),
+            "r": ROTATION_NAMES[int(pr)],
+            "rotation": int(pr),
+            "kind": kind,
+            "last_was_rot": bool(last_was_rot),
+            "last_rot_dir": last_dir,
+            "last_kick_idx": last_kick,
+        }
+
+    def _bfs_result_from_state(self, kind, px, py, pr, last_was_rot, last_dir, last_kick, *, base_attack):
+        piece = Piece(kind, rotation=pr, position=(px, py))
+        piece.last_action_was_rotation = bool(last_was_rot)
+        piece.last_rotation_dir = last_dir
+        piece.last_kick_index = last_kick
+        final_board, stats = self._simulate_lock(piece, base_attack=base_attack)
+        return {
+            "board": final_board,
+            "stats": stats,
+            "placement": self._placement_payload(
+                kind, px, py, pr, last_was_rot, last_dir, last_kick
+            ),
+        }
+
+    def _numba_bfs_results(self, piece, bfs_inputs, include_180, base_attack):
+        results = []
+        count, rx, ry, rr, r_last_was, r_last_dir, r_last_kick = _bfs_core(
+            self.board,
+            bfs_inputs["shapes_arr"],
+            bfs_inputs["kick_table_arr"],
+            KICKS_180_NS_ARR,
+            KICKS_180_EW_ARR,
+            include_180,
+            bfs_inputs["start_x"],
+            bfs_inputs["start_y"],
+            bfs_inputs["start_rot"],
+            piece.last_action_was_rotation,
+            bfs_inputs["last_rot_dir"],
+            bfs_inputs["last_kick_idx"],
+            bfs_inputs["piece_is_o"],
+        )
+
+        for idx in range(count):
+            last_dir = int(r_last_dir[idx])
+            last_kick = int(r_last_kick[idx])
+            results.append(self._bfs_result_from_state(
+                bfs_inputs["kind"],
+                int(rx[idx]),
+                int(ry[idx]),
+                int(rr[idx]),
+                bool(r_last_was[idx]),
+                None if last_dir == 0 else last_dir,
+                None if last_kick < 0 else last_kick,
+                base_attack=base_attack,
+            ))
+        return results
+
+    def _python_bfs_results(self, piece, bfs_inputs, include_180, base_attack):
+        results = []
+        queue = deque([(
+            bfs_inputs["start_x"],
+            bfs_inputs["start_y"],
+            bfs_inputs["start_rot"],
+            piece.last_action_was_rotation,
+            piece.last_rotation_dir,
+            piece.last_kick_index,
+        )])
+        visited = np.zeros((BOARD_HEIGHT, BOARD_WIDTH, 4), dtype=np.bool_)
+        visited[bfs_inputs["start_y"], bfs_inputs["start_x"], bfs_inputs["start_rot"]] = True
+        rotation_actions = [1, -1, 2] if include_180 else [1, -1]
+        board = self.board
+        kind = bfs_inputs["kind"]
+        kick_table = bfs_inputs["kick_table"]
+        shapes = bfs_inputs["shapes"]
+
+        while queue:
+            px, py, pr, last_was_rot, last_rot_dir, last_kick = queue.popleft()
+            current_shape = shapes[pr]
+
+            if _check_collision_raw(board, current_shape, px, py + 1):
+                results.append(self._bfs_result_from_state(
+                    kind,
+                    px,
+                    py,
+                    pr,
+                    last_was_rot,
+                    last_rot_dir,
+                    last_kick,
+                    base_attack=base_attack,
+                ))
+
+            for dx, dy in [(-1, 0), (1, 0), (0, 1)]:
+                nx, ny = px + dx, py + dy
+                if _check_collision_raw(board, current_shape, nx, ny):
+                    continue
+                if visited[ny, nx, pr]:
+                    continue
+
+                visited[ny, nx, pr] = True
+                queue.append((nx, ny, pr, False, None, None))
+
+            for rot_dir in rotation_actions:
+                new_r = (pr + rot_dir) % 4
+                new_shape = shapes[new_r]
+                success = False
+                final_nx, final_ny, final_kick_idx = px, py, 0
+
+                if abs(rot_dir) == 2:
+                    kicks = KICKS_180_NS if pr % 2 == 0 else KICKS_180_EW
+                    for kick_idx, (kick_x, kick_y) in enumerate(kicks):
+                        tx, ty = px + kick_x, py - kick_y
+                        if not _check_collision_raw(board, new_shape, tx, ty):
+                            final_nx, final_ny, final_kick_idx = tx, ty, kick_idx
+                            success = True
+                            break
+                elif kind == "O":
+                    if not _check_collision_raw(board, new_shape, px, py):
+                        success = True
+                else:
+                    for kick_idx in range(5):
+                        ox, oy = kick_table[pr][kick_idx]
+                        nx_off, ny_off = kick_table[new_r][kick_idx]
+                        kick_x = ox - nx_off
+                        kick_y = oy - ny_off
+                        tx, ty = px + kick_x, py - kick_y
+                        if not _check_collision_raw(board, new_shape, tx, ty):
+                            final_nx, final_ny, final_kick_idx = tx, ty, kick_idx
+                            success = True
+                            break
+
+                if success and not visited[final_ny, final_nx, new_r]:
+                    visited[final_ny, final_nx, new_r] = True
+                    queue.append((final_nx, final_ny, new_r, True, rot_dir, final_kick_idx))
+
+        return results
+
+    def bfs_all_placements(
+        self,
+        piece=None,
+        include_180=True,
+        base_attack=None,
+        include_no_place=True,
+        dedupe_final=True,
+    ):
+        if piece is None:
+            piece = self.current_piece
+        if piece is None:
+            return self._empty_bfs_results(include_no_place)
+
+        bfs_inputs = self._bfs_inputs_for_piece(piece)
+        results = self._empty_bfs_results(include_no_place)
+        if NUMBA_AVAILABLE:
+            results.extend(self._numba_bfs_results(piece, bfs_inputs, include_180, base_attack))
+        else:
+            results.extend(self._python_bfs_results(piece, bfs_inputs, include_180, base_attack))
+        return _dedupe_bfs_results(results) if dedupe_final else results
+
+    def lock_piece(self, piece=None, run_end_phase=False, base_attack=None):
+        if piece is None:
+            piece = self.current_piece
+        if piece is None:
+            return 0
+
+        spin_result = self.detect_spin(piece)
+        blocks = self.piece_blocks(piece)
+        _place_blocks_on_board(self.board, blocks, _resolve_piece_id(piece.kind))
+        self.current_piece = None
+        locked_in_hidden = bool(np.all(blocks[:, 1] < HIDDEN_ROWS))
+        cleared = self.clear_lines()
+        stats = self.compute_attack_for_clear(
+            cleared,
+            spin_result,
+            board_after_clear=self.board,
+            combo=self.combo,
+            combo_active=self.combo_active,
+            b2b_chain=self.b2b_chain,
+            surge_charge=self.surge_charge,
+            base_attack=base_attack,
+        )
+        self._apply_lock_stats(cleared, self._augment_lock_stats(stats, spin_result))
+        if not self.game_over and locked_in_hidden and cleared == 0:
+            self.game_over = True
+            self.game_over_reason = "lock_out"
+        if run_end_phase:
+            self.last_end_phase = self.end_phase(cleared)
+        return cleared
+
+    def lock_and_spawn(self, piece=None):
+        cleared = self.lock_piece(piece=piece, run_end_phase=False)
+        self.last_end_phase = self.end_phase(cleared)
+        return cleared, self.last_end_phase
+
+    def get_queue_snapshot(self, next_slots: int = 5):
+        current = None if self.current_piece is None else self.current_piece.kind
+        hold_kind = None
+        if self.hold is not None:
+            hold_kind = _resolve_piece_kind(self.hold)
+        next_ids = [int(pid) for pid in np.asarray(self.bag[: max(0, int(next_slots))], dtype=np.int64)]
+        next_kinds = [PIECE_ID_TO_KIND.get(pid, pid) for pid in next_ids]
+        piece_ids = [
+            0 if current is None else int(_resolve_piece_id(current)),
+            0 if hold_kind is None else int(_resolve_piece_id(hold_kind)),
+        ] + next_ids
+        while len(piece_ids) < 2 + int(next_slots):
+            piece_ids.append(0)
+        return {
+            "current": current,
+            "hold": hold_kind,
+            "next_ids": next_ids,
+            "next_kinds": next_kinds,
+            "piece_ids": piece_ids,
+        }
+
+    def get_bag_remainder_counts(self):
+        counts = {kind: 0 for kind in PIECE_ID_TO_KIND.values()}
+        bag = np.asarray(self.bag, dtype=np.int64)
+        if bag.size == 0:
+            remaining = 0
+        else:
+            remaining = int(len(bag) % 7)
+            if self.current_piece is None and remaining == 0:
+                remaining = min(7, int(len(bag)))
+
+        for raw_pid in bag[:remaining]:
+            pid = int(raw_pid)
+            kind = PIECE_ID_TO_KIND.get(pid)
+            if kind is None:
+                continue
+            counts[kind] += 1
+
+        if self.current_piece is None:
+            bag_position = 0
+        else:
+            bag_position = int(max(0, 7 - remaining))
+        return {
+            "counts": counts,
+            "remaining": int(remaining),
+            "bag_position": bag_position,
+        }
+
+    def get_pending_garbage_summary(self):
+        pending = list(self.incoming_garbage or [])
+        total_lines = sum(int(batch.get("lines", 0)) for batch in pending)
+        timers = [int(batch.get("timer", 0)) for batch in pending]
+        return {
+            "total_lines": int(total_lines),
+            "min_timer": int(min(timers)) if timers else 0,
+            "max_timer": int(max(timers)) if timers else 0,
+            "batch_count": int(len(pending)),
+            "landing_within_one_ply": bool(any(timer <= 1 for timer in timers)),
+        }
+
+    def is_opener_phase(self, piece_count_or_move_number=None):
+        if piece_count_or_move_number is None:
+            piece_count_or_move_number = self.pieces_placed
+        return int(piece_count_or_move_number) < OPENER_PHASE_PIECES
+
+    def apply_placement(self, placement):
+        """Apply placement fields onto the current piece and validate them."""
+        piece = self.current_piece
+        if piece is None:
+            return False
+
+        x = int(placement.get("x", piece.position[0]))
+        y = int(placement.get("y", piece.position[1]))
+        rotation = int(placement.get("rotation", piece.rotation))
+        piece.position = (x, y)
+        piece.rotation = rotation
+        piece.last_action_was_rotation = bool(placement.get("last_was_rot", False))
+
+        last_dir = placement.get("last_rot_dir")
+        piece.last_rotation_dir = None if last_dir in (None, 0) else int(last_dir)
+
+        last_kick = placement.get("last_kick_idx")
+        if last_kick is None:
+            piece.last_kick_index = None
+        else:
+            last_kick = int(last_kick)
+            piece.last_kick_index = None if last_kick < 0 else last_kick
+
+        try:
+            return bool(self.is_position_valid(piece, piece.position, piece.rotation))
+        except TypeError:
+            return bool(self.is_position_valid(piece, position=piece.position))
+
+    def execute_placement(self, placement, *, run_end_phase=True):
+        """Execute a BFS placement payload against the live engine."""
+        if not self.apply_placement(placement):
+            self.game_over = True
+            self.game_over_reason = "invalid_placement"
+            return {
+                "ok": False,
+                "lines_cleared": 0,
+                "stats": None,
+                "end_phase": None,
+                "attack": 0,
+            }
+
+        cleared = self.lock_piece(run_end_phase=run_end_phase)
+        return {
+            "ok": True,
+            "lines_cleared": int(cleared),
+            "stats": None if self.last_clear_stats is None else dict(self.last_clear_stats),
+            "end_phase": None if self.last_end_phase is None else dict(self.last_end_phase),
+            "attack": int((self.last_clear_stats or {}).get("attack") or 0),
+        }
+
+    def end_phase(self, cleared_lines):
+        result = {
+            "lines_cleared": cleared_lines,
+            "spawned": False,
+            "clutch_clear": False,
+            "game_over": self.game_over,
+            "reason": self.game_over_reason,
+        }
+
+        if self.game_over:
+            return result
+
+        spawned = self.spawn_next(allow_clutch=cleared_lines > 0)
+        result["spawned"] = spawned
+        result["clutch_clear"] = self.last_spawn_was_clutch
+        result["game_over"] = self.game_over
+        result["reason"] = self.game_over_reason
+        return result
+
+    def clear_lines(self):
+        full_rows = np.where(np.all(self.board != 0, axis=1))[0]
+        if full_rows.size == 0:
+            return 0
+        self.board = np.delete(self.board, full_rows, axis=0)
+        new_rows = np.zeros((len(full_rows), BOARD_WIDTH), dtype=self.board.dtype)
+        self.board = np.vstack((new_rows, self.board))
+        return int(full_rows.size)
+
+    # ------------------------------------------------------------------ #
+    #  Garbage Handling                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _next_garbage_hole_column(self):
+        prev_col = self.incoming_garbage[-1]["col"] if self.incoming_garbage else self.garbage_col
+        available = [col for col in range(BOARD_WIDTH) if col != prev_col]
+        rng = self.rng if self.rng is not None else np.random
+        return int(rng.choice(available))
+
+    def add_incoming_garbage(self, lines: int, timer: int = 60, col: Optional[int] = None) -> None:
+        """Enqueue an incoming garbage batch.
+
+        Parameters
+        ----------
+        lines : Number of garbage lines in this batch.
+        timer : Ticks until the garbage lands (default 60 ≈ 1 second at 60 fps).
+        col   : Hole column (0-9).  If None, picks a random column that is
+                different from the previous batch's column (TETR.IO
+                change-on-attack rule).
+        """
+        if lines <= 0:
+            return
+        if col is None:
+            col = self._next_garbage_hole_column()
+        self.incoming_garbage.append({"lines": int(lines), "timer": int(timer), "col": int(col)})
+
+    def cancel_garbage(self, attack: int) -> int:
+        """Cancel pending incoming garbage using outgoing attack lines.
+
+        Cancels from the oldest pending batch first.  Returns any leftover
+        attack that exceeded the total pending garbage.
+        """
+        remaining = int(attack)
+        while remaining > 0 and self.incoming_garbage:
+            batch = self.incoming_garbage[0]
+            if batch["lines"] <= remaining:
+                remaining -= batch["lines"]
+                self.incoming_garbage.pop(0)
+            else:
+                batch["lines"] -= remaining
+                remaining = 0
+        return remaining
+
+    def resolve_outgoing_attack(self, outgoing_attack, *, opener_phase=None):
+        """Resolve outgoing attack against this engine's pending queue.
+
+        During opener phase, if pending garbage exceeds the raw outgoing attack,
+        the cancel cap doubles and all attack is consumed defensively.
+        """
+        outgoing_attack = max(0, int(outgoing_attack))
+        pending_before = self.get_pending_garbage_summary()
+        if opener_phase is None:
+            opener_phase = self.is_opener_phase()
+        total_pending = int(pending_before["total_lines"])
+
+        canceled = 0
+        sent = 0
+        used_opener_multiplier = False
+
+        if outgoing_attack > 0 and opener_phase and total_pending > outgoing_attack:
+            used_opener_multiplier = True
+            cancel_cap = min(total_pending, outgoing_attack * 2)
+            before = total_pending
+            _ = self.cancel_garbage(cancel_cap)
+            canceled = before - self.get_pending_garbage_summary()["total_lines"]
+            sent = 0
+        else:
+            before = total_pending
+            sent = self.cancel_garbage(outgoing_attack)
+            canceled = before - self.get_pending_garbage_summary()["total_lines"]
+
+        self.total_attack_canceled += int(canceled)
+        pending_after = self.get_pending_garbage_summary()
+        return {
+            "incoming_before": pending_before,
+            "incoming_after": pending_after,
+            "outgoing_attack": int(outgoing_attack),
+            "canceled": int(canceled),
+            "sent": int(sent),
+            "used_opener_multiplier": bool(used_opener_multiplier),
+            "opener_phase": bool(opener_phase),
+        }
+
+    def apply_garbage(self, lines: int, col: int) -> None:
+        """Push ``lines`` garbage rows onto the bottom of the board.
+
+        Each garbage row is fully filled except for a single hole at column
+        ``col``.  Rows above are shifted up; any rows that scroll past the top
+        of the board are lost (top-out is checked separately in lock_piece).
+        """
+        if lines <= 0:
+            return
+        garbage_row = np.full(BOARD_WIDTH, GARBAGE_ID, dtype=self.board.dtype)
+        garbage_row[col] = 0  # hole
+        new_rows = np.tile(garbage_row, (lines, 1))
+        # Shift the board up and append the new garbage rows at the bottom.
+        self.board = np.vstack((self.board[lines:], new_rows))
+        self.garbage_col = col
+
+    def tick_garbage(self) -> int:
+        """Advance all garbage timers by one tick and apply any that expire.
+
+        Returns the total number of garbage lines that actually landed this
+        tick so callers can check for a resulting top-out.
+        """
+        landed = 0
+        still_pending = []
+        for batch in self.incoming_garbage:
+            batch["timer"] -= 1
+            if batch["timer"] <= 0:
+                self.apply_garbage(batch["lines"], batch["col"])
+                landed += batch["lines"]
+            else:
+                still_pending.append(batch)
+        self.incoming_garbage = still_pending
+        return landed
+
+    # ------------------------------------------------------------------ #
+    #  Spin Detection                                                      #
+    # ------------------------------------------------------------------ #
+
+    def detect_spin(self, piece):
+        """
+        TETR.IO Spin Detection Algorithm
+
+        Pre-condition: Last action must have been a successful rotation.
+
+        Default mode: T-Spins only, using the 3-corner rule plus face rule.
+        Optional mode: non-T all-spins via immobility check.
+        """
+        if not piece.last_action_was_rotation:
+            return None
+
+        kind = _resolve_piece_kind(piece.kind)
+        if kind == "T":
+            return self._detect_t_spin(piece)
+        if self.spin_mode == "all_spin" and kind in ("J", "L", "S", "Z", "I"):
+            return self._detect_all_spin(piece)
+
+        return None
+
+    def _detect_t_spin(self, piece):
+        corners_occupied = self._occupied_3x3_corners(piece)
+        if corners_occupied < 3:
+            return None
+
+        rotation_dir = 0 if piece.last_rotation_dir is None else int(piece.last_rotation_dir)
+        is_180 = abs(rotation_dir) == 2
+        front_corners = self._count_t_front_corners(piece)
+        is_full = is_180 or piece.last_kick_index == 4 or front_corners == 2
+        is_mini = not is_full
+
+        return {
+            "piece": "T",
+            "spin_type": "t-spin",
+            "is_mini": is_mini,
+            "is_180": is_180,
+            "corners": corners_occupied,
+            "front_corners": front_corners,
+            "kick_index": piece.last_kick_index,
+            "rotation_dir": rotation_dir,
+            "description": f"{'180 ' if is_180 else ''}T-Spin{' Mini' if is_mini else ''}"
+        }
+
+    def _detect_all_spin(self, piece):
+        """
+        All-Spin Detection (J, L, S, Z, I)
+
+        Requirement: Piece must be immobile (cannot move left, right, or up)
+        """
+        px, py = piece.position
+
+        can_move_left = self.is_position_valid(piece, (px - 1, py))
+        can_move_right = self.is_position_valid(piece, (px + 1, py))
+        can_move_up = self.is_position_valid(piece, (px, py - 1))
+
+        if can_move_left or can_move_right or can_move_up:
+            return None
+
+        return {
+            "piece": piece.kind,
+            "spin_type": "spin",
+            "is_mini": True,
+            "is_180": abs(piece.last_rotation_dir) == 2,
+            "kick_index": piece.last_kick_index,
+            "rotation_dir": piece.last_rotation_dir,
+            "description": f"{piece.kind}-Spin Mini"
+        }
+
+    def _occupied_3x3_corners(self, piece):
+        """Count how many of the 4 corners of a 3x3 bounding box are occupied."""
+        px, py = piece.position
+        corners = [(0, 0), (2, 0), (0, 2), (2, 2)]
+        occupied = 0
+        for cx, cy in corners:
+            if self._cell_blocked(px + cx, py + cy):
+                occupied += 1
+        return occupied
+
+    def _count_t_front_corners(self, piece):
+        """
+        Count occupied front corners based on T-piece rotation.
+
+        Front corners are the two corners the T is "facing":
+        - Rotation 0 (pointing up): Top corners (0,0) and (2,0)
+        - Rotation 1 (pointing right): Right corners (2,0) and (2,2)
+        - Rotation 2 (pointing down): Bottom corners (0,2) and (2,2)
+        - Rotation 3 (pointing left): Left corners (0,0) and (0,2)
+        """
+        px, py = piece.position
+        rotation = piece.rotation
+
+        front_corners = {
+            0: [(0, 0), (2, 0)],
+            1: [(2, 0), (2, 2)],
+            2: [(0, 2), (2, 2)],
+            3: [(0, 0), (0, 2)],
+        }
+
+        corners = front_corners[rotation]
+        occupied = 0
+        for cx, cy in corners:
+            if self._cell_blocked(px + cx, py + cy):
+                occupied += 1
+
+        return occupied
