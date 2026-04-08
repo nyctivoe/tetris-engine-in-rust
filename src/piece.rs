@@ -1,4 +1,6 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Hash, Serialize)]
 pub enum PieceKind {
     I,
     O,
@@ -23,7 +25,7 @@ impl PieceKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Piece {
     pub kind: PieceKind,
     pub rotation: u8,

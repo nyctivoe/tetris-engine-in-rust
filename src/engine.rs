@@ -3,16 +3,19 @@ use crate::board::{
     board_index, cell_blocked, compute_blocks, is_position_valid as board_is_position_valid,
 };
 use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, HIDDEN_ROWS, SPAWN_X, SPAWN_Y};
+use crate::garbage::GarbageBatch;
 use crate::piece::{Piece, PieceKind, piece_id, piece_kind_from_id};
 use crate::rng::EngineRng;
 use crate::rotation::{rotation_candidates, rotation_delta_from_i8};
 use crate::scoring::{
-    AttackStats, B2BMode, SpinMode, SpinResult, base_attack_for_clear, build_attack_stats,
+    AttackStats, B2BMode, B2BUpdate, ClearClassification, SpinMode, SpinResult,
+    b2b_bonus_for_chain as b2b_bonus_for_chain_value, base_attack_for_clear, build_attack_stats,
     classify_clear, combo_after_clear, combo_attack_down as combo_attack_down_value,
-    update_b2b_state,
+    surge_segments as surge_segments_value, update_b2b_state,
 };
+use serde::Serialize;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct QueueSnapshot {
     pub current: Option<PieceKind>,
     pub hold: Option<PieceKind>,
@@ -21,14 +24,14 @@ pub struct QueueSnapshot {
     pub piece_ids: Vec<i8>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct BagRemainderCounts {
     pub counts: [u8; 7],
     pub remaining: usize,
     pub bag_position: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct EndPhaseResult {
     pub lines_cleared: i32,
     pub spawned: bool,
@@ -37,7 +40,7 @@ pub struct EndPhaseResult {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct PlacementPayload {
     pub x: Option<i16>,
     pub y: Option<i16>,
@@ -47,7 +50,7 @@ pub struct PlacementPayload {
     pub last_kick_idx: Option<i8>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExecutePlacementResult {
     pub ok: bool,
     pub lines_cleared: i32,
@@ -56,7 +59,7 @@ pub struct ExecutePlacementResult {
     pub attack: i32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct PlacementSnapshot {
     pub x: i16,
     pub y: i16,
@@ -82,6 +85,7 @@ enum KickTableSelector {
     Jlstz,
 }
 
+#[derive(Clone)]
 pub struct TetrisEngine {
     pub board: Board,
     pub current_piece: Option<Piece>,
@@ -103,6 +107,9 @@ pub struct TetrisEngine {
     pub pieces_placed: i32,
     pub total_lines_cleared: i32,
     pub total_attack_sent: i32,
+    pub total_attack_canceled: i32,
+    pub incoming_garbage: Vec<GarbageBatch>,
+    pub garbage_col: Option<u8>,
     pub rng: EngineRng,
 }
 
@@ -135,6 +142,9 @@ impl TetrisEngine {
             pieces_placed: 0,
             total_lines_cleared: 0,
             total_attack_sent: 0,
+            total_attack_canceled: 0,
+            incoming_garbage: Vec::new(),
+            garbage_col: None,
             rng,
         };
         engine.generate_bag();
@@ -168,6 +178,9 @@ impl TetrisEngine {
         self.pieces_placed = 0;
         self.total_lines_cleared = 0;
         self.total_attack_sent = 0;
+        self.total_attack_canceled = 0;
+        self.incoming_garbage.clear();
+        self.garbage_col = None;
         self.generate_bag();
     }
 
@@ -338,6 +351,22 @@ impl TetrisEngine {
         }
     }
 
+    pub fn board_with_active_piece(&self) -> Board {
+        let mut board = self.board;
+        let Some(piece) = self.current_piece.as_ref() else {
+            return board;
+        };
+
+        let piece_id_value = piece_id(piece.kind);
+        for (x, y) in self.piece_blocks(piece, None, None) {
+            if let Some(index) = board_index(x, y) {
+                board[index] = piece_id_value;
+            }
+        }
+
+        board
+    }
+
     pub fn end_phase(&mut self, cleared_lines: i32) -> EndPhaseResult {
         let mut result = EndPhaseResult {
             lines_cleared: cleared_lines,
@@ -375,6 +404,43 @@ impl TetrisEngine {
         rotation: Option<u8>,
     ) -> bool {
         board_is_position_valid(&self.board, piece, position, rotation)
+    }
+
+    pub fn translate_current(&mut self, dx: i16, dy: i16) -> bool {
+        if self.game_over {
+            return false;
+        }
+
+        let Some(mut piece) = self.current_piece.take() else {
+            return false;
+        };
+
+        let next_pos = (piece.position.0 + dx, piece.position.1 + dy);
+        if !self.is_position_valid(&piece, Some(next_pos), Some(piece.rotation)) {
+            self.current_piece = Some(piece);
+            return false;
+        }
+
+        piece.position = next_pos;
+        piece.last_action_was_rotation = false;
+        piece.last_rotation_dir = None;
+        piece.last_kick_index = None;
+        self.current_piece = Some(piece);
+        true
+    }
+
+    pub fn ghost_position(&self) -> Option<(i16, i16)> {
+        let mut ghost = self.current_piece?;
+
+        while self.is_position_valid(
+            &ghost,
+            Some((ghost.position.0, ghost.position.1 + 1)),
+            Some(ghost.rotation),
+        ) {
+            ghost.position.1 += 1;
+        }
+
+        Some(ghost.position)
     }
 
     pub fn rotate_piece(&self, piece: &mut Piece, delta: i8) -> bool {
@@ -472,6 +538,49 @@ impl TetrisEngine {
         combo_attack_down_value(base_attack, combo.unwrap_or(self.combo))
     }
 
+    pub fn b2b_bonus_for_chain(&self, chain_len: i32) -> i32 {
+        b2b_bonus_for_chain_value(chain_len)
+    }
+
+    pub fn update_b2b_state(
+        &self,
+        cleared_lines: i32,
+        difficult: bool,
+        b2b_chain: i32,
+        surge_charge: i32,
+    ) -> B2BUpdate {
+        update_b2b_state(
+            self.b2b_mode,
+            cleared_lines,
+            difficult,
+            b2b_chain,
+            surge_charge,
+        )
+    }
+
+    pub fn update_b2b_and_surge(
+        &self,
+        cleared_lines: i32,
+        difficult: bool,
+        b2b_chain: i32,
+        surge_charge: i32,
+    ) -> B2BUpdate {
+        self.update_b2b_state(cleared_lines, difficult, b2b_chain, surge_charge)
+    }
+
+    pub fn surge_segments(&self, total: i32) -> Vec<i32> {
+        surge_segments_value(total)
+    }
+
+    pub(crate) fn classify_clear(
+        &self,
+        cleared_lines: i32,
+        spin_result: Option<&SpinResult>,
+        perfect_clear: bool,
+    ) -> ClearClassification {
+        classify_clear(cleared_lines, spin_result, perfect_clear)
+    }
+
     pub fn compute_attack_for_clear(
         &self,
         cleared_lines: i32,
@@ -490,12 +599,11 @@ impl TetrisEngine {
 
         let (computed_base_attack, perfect_clear) =
             base_attack_for_clear(cleared_lines, spin_result.as_ref(), board_after_clear);
-        let classification = classify_clear(cleared_lines, spin_result.as_ref(), perfect_clear);
+        let classification = self.classify_clear(cleared_lines, spin_result.as_ref(), perfect_clear);
         let base_attack = base_attack.unwrap_or(computed_base_attack);
 
         let next_combo = combo_after_clear(cleared_lines, combo, combo_active);
-        let b2b_update = update_b2b_state(
-            self.b2b_mode,
+        let b2b_update = self.update_b2b_state(
             cleared_lines,
             classification.is_difficult,
             b2b_chain,
@@ -528,6 +636,7 @@ impl TetrisEngine {
         )
     }
 
+    // Python: detect_spin
     pub fn detect_spin(&self, piece: &Piece) -> Option<SpinResult> {
         if !piece.last_action_was_rotation {
             return None;
@@ -544,6 +653,7 @@ impl TetrisEngine {
         }
     }
 
+    // Python: predict_post_lock_stats
     pub fn predict_post_lock_stats(
         &self,
         piece: &Piece,
@@ -567,6 +677,7 @@ impl TetrisEngine {
         }
     }
 
+    // Python: lock_piece
     pub fn lock_piece(
         &mut self,
         piece: Option<Piece>,
@@ -620,6 +731,7 @@ impl TetrisEngine {
         cleared
     }
 
+    // Python: lock_and_spawn
     pub fn lock_and_spawn(&mut self, piece: Option<Piece>) -> (i32, EndPhaseResult) {
         let cleared = self.lock_piece(piece, false, None);
         let end_phase = self.end_phase(cleared);
@@ -633,6 +745,7 @@ impl TetrisEngine {
         cleared
     }
 
+    // Python: _simulate_lock
     pub(crate) fn simulate_lock(
         &self,
         piece: &Piece,
@@ -1235,6 +1348,9 @@ mod tests {
             pieces_placed: 0,
             total_lines_cleared: 0,
             total_attack_sent: 0,
+            total_attack_canceled: 0,
+            incoming_garbage: Vec::new(),
+            garbage_col: None,
             rng: crate::rng::EngineRng::seeded(0),
         };
 
@@ -1395,6 +1511,53 @@ mod tests {
             board_is_position_valid(&engine.board, &piece, Some((3, 0)), None)
         );
         assert!(!engine.is_position_valid(&piece, Some((3, 0)), None));
+    }
+
+    #[test]
+    fn board_with_active_piece_overlays_current_piece_without_mutating_board() {
+        let mut engine = TetrisEngine::with_seed(13);
+        engine.current_piece = Some(Piece::new(PieceKind::T, 0, (3, 0)));
+
+        let rendered = engine.board_with_active_piece();
+
+        assert_eq!(engine.board, [0; BOARD_WIDTH * BOARD_HEIGHT]);
+        for (x, y) in compute_blocks(&engine.current_piece.expect("active piece"), None, None) {
+            let index = board_index(x, y).expect("overlay block should be in bounds");
+            assert_eq!(rendered[index], 3);
+        }
+    }
+
+    #[test]
+    fn translate_current_moves_piece_and_clears_rotation_metadata() {
+        let mut engine = TetrisEngine::with_seed(13);
+        engine.current_piece = Some(Piece {
+            kind: PieceKind::T,
+            rotation: 1,
+            position: (3, 5),
+            last_action_was_rotation: true,
+            last_rotation_dir: Some(1),
+            last_kick_index: Some(2),
+        });
+
+        assert!(engine.translate_current(1, 0));
+        let piece = engine.current_piece.expect("piece should remain active");
+        assert_eq!(piece.position, (4, 5));
+        assert_eq!(piece.rotation, 1);
+        assert!(!piece.last_action_was_rotation);
+        assert_eq!(piece.last_rotation_dir, None);
+        assert_eq!(piece.last_kick_index, None);
+    }
+
+    #[test]
+    fn ghost_position_returns_final_landing_row_for_active_piece() {
+        let mut engine = TetrisEngine::with_seed(13);
+        engine.current_piece = Some(Piece::new(PieceKind::O, 0, (4, 0)));
+
+        assert_eq!(engine.ghost_position(), Some((4, 37)));
+
+        set_board_cell(&mut engine, 4, 39, 9);
+        set_board_cell(&mut engine, 5, 39, 9);
+        assert_eq!(engine.ghost_position(), Some((4, 36)));
     }
 
     #[test]
@@ -2017,6 +2180,60 @@ mod tests {
         assert_eq!(engine.combo_attack_down(4, Some(2)), 6);
         assert_eq!(engine.combo_attack_down(0, Some(2)), 1);
         assert_eq!(engine.combo_attack_down(0, Some(1)), 0);
+    }
+
+    #[test]
+    fn engine_helper_wrappers_match_scoring_helpers() {
+        let engine = TetrisEngine::default();
+
+        assert_eq!(engine.b2b_bonus_for_chain(4), 2);
+        assert_eq!(
+            engine.update_b2b_state(4, true, 3, 0),
+            crate::B2BUpdate {
+                b2b_chain: 4,
+                surge_charge: 3,
+                b2b_bonus: 2,
+                surge_send: 0,
+            }
+        );
+        assert_eq!(
+            engine.update_b2b_and_surge(1, false, 5, 4),
+            crate::B2BUpdate {
+                b2b_chain: 0,
+                surge_charge: 0,
+                b2b_bonus: 0,
+                surge_send: 4,
+            }
+        );
+        assert_eq!(engine.surge_segments(4), vec![2, 1, 1]);
+    }
+
+    #[test]
+    fn classify_clear_wrapper_preserves_python_flags() {
+        let engine = TetrisEngine::default();
+        let classification = engine.classify_clear(
+            2,
+            Some(&crate::SpinResult {
+                piece: PieceKind::T,
+                spin_type: "t-spin",
+                is_mini: false,
+                is_180: false,
+                kick_index: Some(0),
+                rotation_dir: Some(1),
+                corners: Some(3),
+                front_corners: Some(2),
+                description: "T-Spin".to_string(),
+            }),
+            false,
+        );
+
+        assert_eq!(classification.lines_cleared, 2);
+        assert!(classification.is_spin);
+        assert_eq!(classification.spin_type, 2);
+        assert!(!classification.is_mini);
+        assert!(classification.is_difficult);
+        assert!(classification.qualifies_b2b);
+        assert!(!classification.breaks_b2b);
     }
 
     #[test]

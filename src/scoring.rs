@@ -1,5 +1,6 @@
 use crate::Board;
 use crate::piece::PieceKind;
+use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpinMode {
@@ -43,7 +44,7 @@ impl Default for B2BMode {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SpinResult {
     pub piece: PieceKind,
     pub spin_type: &'static str,
@@ -56,7 +57,7 @@ pub struct SpinResult {
     pub description: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AttackStats {
     pub attack: i32,
     pub b2b_bonus: i32,
@@ -98,8 +99,8 @@ pub(crate) struct ClearClassification {
     pub breaks_b2b: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct B2BUpdate {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct B2BUpdate {
     pub b2b_chain: i32,
     pub surge_charge: i32,
     pub b2b_bonus: i32,
