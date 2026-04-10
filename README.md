@@ -10,7 +10,7 @@ This repo attempts to replicate the [tetr.io](https://tetr.io) tetris engine in 
 - parity fixture loading and comparison against Python-exported canonical JSON
 - reproducible Rust/Python BFS timing harness
 
-Default rules match the existing reference defaults:
+Defaults:
 
 - `spin_mode = all_spin`
 - `b2b_mode = surge`
