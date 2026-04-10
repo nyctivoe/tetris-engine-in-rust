@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::piece::{
-    I_OFFSETS, JLSTZ_OFFSETS, KICKS_180_EW, KICKS_180_NS, O_OFFSETS, PieceKind, piece_definition,
+    piece_definition, PieceKind, I_OFFSETS, JLSTZ_OFFSETS, KICKS_180_EW, KICKS_180_NS, O_OFFSETS,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,11 +237,11 @@ mod tests {
         );
         assert_eq!(
             rotation_candidates(PieceKind::I, 0, 1, 1),
-            vec![(0, 1, 0), (1, -1, 0), (2, 2, 0), (3, -1, -1), (4, 2, 2)]
+            vec![(0, 0, 0), (1, -2, 0), (2, 1, 0), (3, -2, -1), (4, 1, 2)]
         );
         assert_eq!(
             rotation_candidates(PieceKind::I, 1, 0, -1),
-            vec![(0, -1, 0), (1, 1, 0), (2, -2, 0), (3, 1, 1), (4, -2, -2)]
+            vec![(0, 0, 0), (1, 2, 0), (2, -1, 0), (3, 2, 1), (4, -1, -2)]
         );
         assert_eq!(
             rotation_candidates(PieceKind::T, 0, 2, 2),

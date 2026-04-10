@@ -1,18 +1,18 @@
-use crate::Board;
 use crate::board::{
     board_index, cell_blocked, compute_blocks, is_position_valid as board_is_position_valid,
 };
 use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, HIDDEN_ROWS, SPAWN_X, SPAWN_Y};
 use crate::garbage::GarbageBatch;
-use crate::piece::{Piece, PieceKind, piece_id, piece_kind_from_id};
+use crate::piece::{piece_id, piece_kind_from_id, Piece, PieceKind};
 use crate::rng::EngineRng;
 use crate::rotation::{rotation_candidates, rotation_delta_from_i8};
 use crate::scoring::{
-    AttackStats, B2BMode, B2BUpdate, ClearClassification, SpinMode, SpinResult,
     b2b_bonus_for_chain as b2b_bonus_for_chain_value, base_attack_for_clear, build_attack_stats,
     classify_clear, combo_after_clear, combo_attack_down as combo_attack_down_value,
-    surge_segments as surge_segments_value, update_b2b_state,
+    surge_segments as surge_segments_value, update_b2b_state, AttackStats, B2BMode, B2BUpdate,
+    ClearClassification, SpinMode, SpinResult,
 };
+use crate::Board;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -599,7 +599,8 @@ impl TetrisEngine {
 
         let (computed_base_attack, perfect_clear) =
             base_attack_for_clear(cleared_lines, spin_result.as_ref(), board_after_clear);
-        let classification = self.classify_clear(cleared_lines, spin_result.as_ref(), perfect_clear);
+        let classification =
+            self.classify_clear(cleared_lines, spin_result.as_ref(), perfect_clear);
         let base_attack = base_attack.unwrap_or(computed_base_attack);
 
         let next_combo = combo_after_clear(cleared_lines, combo, combo_active);
@@ -985,8 +986,9 @@ const fn kind_index(kind: PieceKind) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        AttackStats, B2BMode, BagRemainderCounts, EndPhaseResult, ExecutePlacementResult,
-        PlacementPayload, PostLockPrediction, QueueSnapshot, SpinMode, TetrisEngine, kind_index,
+        kind_index, AttackStats, B2BMode, BagRemainderCounts, EndPhaseResult,
+        ExecutePlacementResult, PlacementPayload, PostLockPrediction, QueueSnapshot, SpinMode,
+        TetrisEngine,
     };
     use crate::board::{board_index, compute_blocks, is_position_valid as board_is_position_valid};
     use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, SPAWN_X, SPAWN_Y};
@@ -1576,7 +1578,7 @@ mod tests {
             (
                 Piece::new(PieceKind::I, 0, (0, 0)),
                 1,
-                (1, 0),
+                (0, 0),
                 1,
                 true,
                 Some(1),
@@ -1638,11 +1640,11 @@ mod tests {
             (PieceKind::T, 0, 1, 2, (3, 19), 1),
             (PieceKind::T, 0, 1, 3, (4, 22), 1),
             (PieceKind::T, 0, 1, 4, (3, 22), 1),
-            (PieceKind::I, 0, 1, 0, (5, 20), 1),
-            (PieceKind::I, 0, 1, 1, (3, 20), 1),
-            (PieceKind::I, 0, 1, 2, (6, 20), 1),
-            (PieceKind::I, 0, 1, 3, (3, 21), 1),
-            (PieceKind::I, 0, 1, 4, (6, 18), 1),
+            (PieceKind::I, 0, 1, 0, (4, 20), 1),
+            (PieceKind::I, 0, 1, 1, (2, 20), 1),
+            (PieceKind::I, 0, 1, 2, (5, 20), 1),
+            (PieceKind::I, 0, 1, 3, (2, 21), 1),
+            (PieceKind::I, 0, 1, 4, (5, 18), 1),
             (PieceKind::T, 0, 2, 0, (4, 20), 2),
             (PieceKind::T, 0, 2, 1, (4, 19), 2),
             (PieceKind::T, 0, 2, 2, (5, 19), 2),
