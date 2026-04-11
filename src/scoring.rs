@@ -1,5 +1,5 @@
-use crate::Board;
 use crate::piece::PieceKind;
+use crate::Board;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,7 +88,7 @@ pub struct AttackStats {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ClearClassification {
+pub struct ClearClassification {
     pub lines_cleared: i32,
     pub spin: Option<SpinResult>,
     pub is_spin: bool,
@@ -108,12 +108,12 @@ pub struct B2BUpdate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ComboUpdate {
+pub struct ComboUpdate {
     pub combo: i32,
     pub combo_active: bool,
 }
 
-pub(crate) fn classify_clear(
+pub fn classify_clear(
     cleared_lines: i32,
     spin_result: Option<&SpinResult>,
     perfect_clear: bool,
@@ -140,7 +140,7 @@ pub(crate) fn classify_clear(
     }
 }
 
-pub(crate) fn b2b_bonus_for_chain(chain_len: i32) -> i32 {
+pub fn b2b_bonus_for_chain(chain_len: i32) -> i32 {
     let effective = (chain_len - 1).max(0);
     match effective {
         0 => 0,
@@ -155,7 +155,7 @@ pub(crate) fn b2b_bonus_for_chain(chain_len: i32) -> i32 {
     }
 }
 
-pub(crate) fn is_difficult_clear(
+pub fn is_difficult_clear(
     cleared_lines: i32,
     spin_result: Option<&SpinResult>,
     perfect_clear: bool,
@@ -169,7 +169,7 @@ pub(crate) fn is_difficult_clear(
     false
 }
 
-pub(crate) fn update_b2b_state(
+pub fn update_b2b_state(
     b2b_mode: B2BMode,
     cleared_lines: i32,
     difficult: bool,
@@ -191,7 +191,11 @@ pub(crate) fn update_b2b_state(
         let next_surge_charge = match b2b_mode {
             B2BMode::Surge => {
                 let b2b_display = next_b2b_chain - 1;
-                if b2b_display >= 3 { b2b_display } else { 0 }
+                if b2b_display >= 3 {
+                    b2b_display
+                } else {
+                    0
+                }
             }
             B2BMode::Chaining => 0,
         };
@@ -214,7 +218,7 @@ pub(crate) fn update_b2b_state(
     }
 }
 
-pub(crate) fn surge_segments(total: i32) -> Vec<i32> {
+pub fn surge_segments(total: i32) -> Vec<i32> {
     if total <= 0 {
         return Vec::new();
     }
@@ -228,7 +232,7 @@ pub(crate) fn surge_segments(total: i32) -> Vec<i32> {
     ]
 }
 
-pub(crate) fn base_attack_for_clear(
+pub fn base_attack_for_clear(
     cleared_lines: i32,
     spin_result: Option<&SpinResult>,
     board_after_clear: &Board,
@@ -268,7 +272,7 @@ pub(crate) fn base_attack_for_clear(
     }
 }
 
-pub(crate) fn combo_after_clear(cleared_lines: i32, combo: i32, combo_active: bool) -> ComboUpdate {
+pub fn combo_after_clear(cleared_lines: i32, combo: i32, combo_active: bool) -> ComboUpdate {
     if cleared_lines <= 0 {
         return ComboUpdate {
             combo: 0,
@@ -287,7 +291,7 @@ pub(crate) fn combo_after_clear(cleared_lines: i32, combo: i32, combo_active: bo
     }
 }
 
-pub(crate) fn combo_attack_down(base_attack: i32, combo: i32) -> i32 {
+pub fn combo_attack_down(base_attack: i32, combo: i32) -> i32 {
     let value = if base_attack > 0 {
         f64::from(base_attack) * (1.0 + 0.25 * f64::from(combo))
     } else if combo >= 2 {
@@ -351,8 +355,8 @@ pub(crate) fn build_attack_stats(
 #[cfg(test)]
 mod tests {
     use super::{
-        B2BMode, PieceKind, SpinResult, b2b_bonus_for_chain, build_attack_stats, combo_after_clear,
-        combo_attack_down, surge_segments, update_b2b_state,
+        b2b_bonus_for_chain, build_attack_stats, combo_after_clear, combo_attack_down,
+        surge_segments, update_b2b_state, B2BMode, PieceKind, SpinResult,
     };
     use crate::scoring::{base_attack_for_clear, classify_clear};
 

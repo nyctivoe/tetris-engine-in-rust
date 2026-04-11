@@ -9,10 +9,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::board::Board;
-use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID, HIDDEN_ROWS, SPAWN_X, SPAWN_Y, VISIBLE_HEIGHT};
+use crate::constants::{
+    BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID, HIDDEN_ROWS, SPAWN_X, SPAWN_Y, VISIBLE_HEIGHT,
+};
 use crate::engine::{BagRemainderCounts, QueueSnapshot, TetrisEngine as CoreEngine};
 use crate::garbage::PendingGarbageSummary;
-use crate::piece::{Piece, PieceKind, piece_id};
+use crate::piece::{piece_id, Piece, PieceKind};
 use crate::rotation::{rotation_delta_from_i8, rotation_delta_from_str, rotation_states};
 use crate::scoring::{B2BMode, SpinMode};
 
@@ -45,7 +47,9 @@ fn spin_mode_from_str(mode: &str) -> PyResult<SpinMode> {
     match mode {
         "t_only" => Ok(SpinMode::TOnly),
         "all_spin" => Ok(SpinMode::AllSpin),
-        _ => Err(PyValueError::new_err(format!("Unsupported spin mode: {mode}"))),
+        _ => Err(PyValueError::new_err(format!(
+            "Unsupported spin mode: {mode}"
+        ))),
     }
 }
 
@@ -53,19 +57,23 @@ fn b2b_mode_from_str(mode: &str) -> PyResult<B2BMode> {
     match mode {
         "surge" => Ok(B2BMode::Surge),
         "chaining" => Ok(B2BMode::Chaining),
-        _ => Err(PyValueError::new_err(format!("Unsupported b2b_mode: {mode}"))),
+        _ => Err(PyValueError::new_err(format!(
+            "Unsupported b2b_mode: {mode}"
+        ))),
     }
 }
 
 fn rotation_delta_from_py(direction: &Bound<'_, PyAny>) -> PyResult<i8> {
     if let Ok(raw) = direction.extract::<i8>() {
-        return rotation_delta_from_i8(raw)
-            .ok_or_else(|| PyValueError::new_err(format!("Unsupported rotation direction: {raw}")));
+        return rotation_delta_from_i8(raw).ok_or_else(|| {
+            PyValueError::new_err(format!("Unsupported rotation direction: {raw}"))
+        });
     }
 
     if let Ok(raw) = direction.extract::<&str>() {
-        return rotation_delta_from_str(raw)
-            .ok_or_else(|| PyValueError::new_err(format!("Unsupported rotation direction: {raw}")));
+        return rotation_delta_from_str(raw).ok_or_else(|| {
+            PyValueError::new_err(format!("Unsupported rotation direction: {raw}"))
+        });
     }
 
     Err(PyTypeError::new_err(
@@ -204,8 +212,9 @@ impl PyPiece {
     }
 
     fn to_piece(&self) -> PyResult<Piece> {
-        let kind = piece_kind_from_str(&self.kind)
-            .ok_or_else(|| PyValueError::new_err(format!("Unsupported piece kind: {}", self.kind)))?;
+        let kind = piece_kind_from_str(&self.kind).ok_or_else(|| {
+            PyValueError::new_err(format!("Unsupported piece kind: {}", self.kind))
+        })?;
         Ok(Piece {
             kind,
             rotation: self.rotation % 4,
@@ -224,7 +233,10 @@ impl PyPiece {
     }
 
     fn __str__(&self) -> String {
-        format!("{} at {:?} (Rot {})", self.kind, self.position, self.rotation)
+        format!(
+            "{} at {:?} (Rot {})",
+            self.kind, self.position, self.rotation
+        )
     }
 }
 
@@ -280,7 +292,12 @@ impl PyTetrisEngine {
 impl PyTetrisEngine {
     #[new]
     #[pyo3(signature = (spin_mode="all_spin", b2b_mode="surge", seed=0, rng=None))]
-    fn new(spin_mode: &str, b2b_mode: &str, seed: u64, rng: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    fn new(
+        spin_mode: &str,
+        b2b_mode: &str,
+        seed: u64,
+        rng: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         let _ = rng;
         let spin_mode = spin_mode_from_str(spin_mode)?;
         let b2b_mode = b2b_mode_from_str(b2b_mode)?;
@@ -449,7 +466,9 @@ impl PyTetrisEngine {
 
     #[pyo3(signature = (lines, timer=60, col=None))]
     fn add_incoming_garbage(&self, lines: i32, timer: i32, col: Option<u8>) {
-        self.inner.borrow_mut().add_incoming_garbage(lines, timer, col);
+        self.inner
+            .borrow_mut()
+            .add_incoming_garbage(lines, timer, col);
     }
 
     fn tick_garbage(&self) -> i32 {

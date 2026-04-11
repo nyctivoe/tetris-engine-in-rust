@@ -31,7 +31,11 @@ pub struct OutgoingAttackResolution {
 
 impl TetrisEngine {
     pub fn get_pending_garbage_summary(&self) -> PendingGarbageSummary {
-        let total_lines = self.incoming_garbage.iter().map(|batch| batch.lines).sum::<i32>();
+        let total_lines = self
+            .incoming_garbage
+            .iter()
+            .map(|batch| batch.lines)
+            .sum::<i32>();
         let min_timer = self
             .incoming_garbage
             .iter()
@@ -60,7 +64,8 @@ impl TetrisEngine {
         }
 
         let col = col.unwrap_or_else(|| self.next_garbage_hole_column());
-        self.incoming_garbage.push(GarbageBatch { lines, timer, col });
+        self.incoming_garbage
+            .push(GarbageBatch { lines, timer, col });
     }
 
     pub fn cancel_garbage(&mut self, attack: i32) -> i32 {
@@ -175,7 +180,7 @@ impl TetrisEngine {
 mod tests {
     use super::{GarbageBatch, PendingGarbageSummary};
     use crate::board::board_index;
-    use crate::{BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID, TetrisEngine};
+    use crate::{TetrisEngine, BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID};
 
     fn set_board_cell(engine: &mut TetrisEngine, x: i16, y: i16, value: i8) {
         let index = board_index(x, y).expect("test coordinates must be in bounds");

@@ -364,7 +364,11 @@ pub(crate) fn python_semantics_bfs(
     let mut visited = vec![false; crate::BOARD_WIDTH * crate::BOARD_HEIGHT * 4];
     visited[visited_index(inputs.start_x, inputs.start_y, inputs.start_rot % 4)] = true;
     let rotation_actions: &[i8] = if include_180 { &[1, -1, 2] } else { &[1, -1] };
-    let probe_piece = Piece::new(inputs.kind, inputs.start_rot, (inputs.start_x, inputs.start_y));
+    let probe_piece = Piece::new(
+        inputs.kind,
+        inputs.start_rot,
+        (inputs.start_x, inputs.start_y),
+    );
 
     while let Some(state) = queue.pop_front() {
         if !is_position_valid(
@@ -515,15 +519,7 @@ impl TetrisEngine {
         BfsResult {
             board: Some(board),
             stats: Some(stats),
-            placement: PlacementRecord::placed(
-                kind,
-                px,
-                py,
-                pr,
-                last_was_rot,
-                last_dir,
-                last_kick,
-            ),
+            placement: PlacementRecord::placed(kind, px, py, pr, last_was_rot, last_dir, last_kick),
             placements: Vec::new(),
         }
     }
@@ -542,7 +538,8 @@ impl TetrisEngine {
 
         let inputs = self.bfs_inputs_for_piece(piece);
         let mut results = self.empty_bfs_results(include_no_place);
-        for terminal in python_semantics_bfs(self, &inputs, piece.last_action_was_rotation, include_180)
+        for terminal in
+            python_semantics_bfs(self, &inputs, piece.last_action_was_rotation, include_180)
         {
             results.push(self.bfs_result_from_state(
                 inputs.kind,
@@ -614,11 +611,13 @@ fn wrap_index(value: i16, upper: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{BfsResultKey, PlacementRecord, python_semantics_bfs};
+    use super::{python_semantics_bfs, BfsResultKey, PlacementRecord};
     use crate::board::board_index;
     use crate::{Piece, PieceKind, TetrisEngine};
 
-    fn result_signature(result: &crate::BfsResult) -> (Option<[i8; 400]>, Option<i32>, PlacementRecord) {
+    fn result_signature(
+        result: &crate::BfsResult,
+    ) -> (Option<[i8; 400]>, Option<i32>, PlacementRecord) {
         (
             result.board,
             result.stats.as_ref().map(|stats| stats.attack),
@@ -770,7 +769,13 @@ mod tests {
         engine.board[index] = 9;
         let before = engine.board;
 
-        let results = engine.bfs_all_placements(Some(&Piece::new(PieceKind::I, 0, (3, 0))), true, None, false, false);
+        let results = engine.bfs_all_placements(
+            Some(&Piece::new(PieceKind::I, 0, (3, 0))),
+            true,
+            None,
+            false,
+            false,
+        );
 
         assert_eq!(engine.board, before);
         assert!(!results.is_empty());

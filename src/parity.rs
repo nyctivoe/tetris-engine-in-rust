@@ -3,9 +3,9 @@ use crate::engine::{BagRemainderCounts, PostLockPrediction, QueueSnapshot, Tetri
 use crate::garbage::{GarbageBatch, OutgoingAttackResolution, PendingGarbageSummary};
 use crate::piece::{Piece, PieceKind};
 use crate::scoring::{AttackStats, B2BMode, SpinMode, SpinResult};
-use crate::{BOARD_HEIGHT, BOARD_WIDTH, Board};
+use crate::{Board, BOARD_HEIGHT, BOARD_WIDTH};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EngineStateFixture {
@@ -178,7 +178,8 @@ pub fn engine_from_fixture(state: &EngineStateFixture) -> TetrisEngine {
         Some("chaining") => B2BMode::Chaining,
         _ => B2BMode::Surge,
     };
-    let mut engine = TetrisEngine::with_seed_and_modes(state.seed.unwrap_or(0), spin_mode, b2b_mode);
+    let mut engine =
+        TetrisEngine::with_seed_and_modes(state.seed.unwrap_or(0), spin_mode, b2b_mode);
     if !state.board.is_empty() {
         engine.board = board_from_flat(&state.board);
     } else {
@@ -383,7 +384,12 @@ pub fn normalize_bfs_results(results: &[BfsResult]) -> Value {
 fn sorted_placement_vec(placements: &[PlacementRecord]) -> Vec<Value> {
     let mut normalized = placements
         .iter()
-        .map(|placement| (placement_sort_key(placement), normalize_placement_record(placement)))
+        .map(|placement| {
+            (
+                placement_sort_key(placement),
+                normalize_placement_record(placement),
+            )
+        })
         .collect::<Vec<_>>();
     normalized.sort_by(|left, right| left.0.cmp(&right.0));
     normalized.into_iter().map(|(_, value)| value).collect()
