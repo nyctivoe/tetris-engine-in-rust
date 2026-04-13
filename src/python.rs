@@ -601,6 +601,10 @@ impl PyTetrisEngine {
         self.inner.borrow().total_attack_canceled
     }
 
+    fn surge_segments(&self, total: i32) -> Vec<i32> {
+        self.inner.borrow().surge_segments(total)
+    }
+
     #[getter]
     fn gravity_timer_ms(&self) -> i32 {
         self.gravity_timer_ms.get()
