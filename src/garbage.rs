@@ -163,7 +163,10 @@ impl TetrisEngine {
             .last()
             .map(|batch| batch.col)
             .or(self.garbage_col);
-        let mut available = [0_u8; BOARD_WIDTH - 1];
+        // When `previous` is Some we exclude one column, leaving BOARD_WIDTH-1
+        // candidates.  When it is None all BOARD_WIDTH columns are valid, so
+        // the array must be sized for the larger case.
+        let mut available = [0_u8; BOARD_WIDTH];
         let mut len = 0;
         for col in 0..BOARD_WIDTH as u8 {
             if Some(col) != previous {

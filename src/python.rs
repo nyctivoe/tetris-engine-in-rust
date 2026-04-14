@@ -475,6 +475,24 @@ impl PyTetrisEngine {
         self.tick_garbage_internal()
     }
 
+    /// Cancel incoming garbage against `attack` (FIFO).  Returns the
+    /// uncanceled overflow that should be sent to the opponent.
+    /// Also increments `total_attack_canceled` by the amount canceled.
+    fn cancel_garbage(&self, attack: i32) -> i32 {
+        self.inner.borrow_mut().cancel_garbage(attack)
+    }
+
+    /// Resolve an outgoing attack: cancel against own incoming garbage queue
+    /// (FIFO), track `total_attack_canceled`, and return a summary dict with
+    /// keys: outgoing_attack, canceled, sent, incoming_before, incoming_after.
+    fn resolve_outgoing_attack(&self, py: Python<'_>, attack: i32) -> PyResult<PyObject> {
+        let resolution = self
+            .inner
+            .borrow_mut()
+            .resolve_outgoing_attack(attack, None);
+        serialize_to_py(py, &resolution)
+    }
+
     #[pyo3(signature = (next_slots=5))]
     fn get_queue_snapshot(&self, py: Python<'_>, next_slots: usize) -> PyResult<PyObject> {
         let snapshot = self.inner.borrow().get_queue_snapshot(next_slots);
