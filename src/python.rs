@@ -14,7 +14,7 @@ use crate::constants::{
 };
 use crate::engine::{BagRemainderCounts, QueueSnapshot, TetrisEngine as CoreEngine};
 use crate::garbage::PendingGarbageSummary;
-use crate::piece::{piece_id, Piece, PieceKind};
+use crate::piece::{Piece, PieceKind, piece_id};
 use crate::rotation::{rotation_delta_from_i8, rotation_delta_from_str, rotation_states};
 use crate::scoring::{B2BMode, SpinMode};
 
@@ -253,6 +253,18 @@ impl PyTetrisEngine {
         self.lock_timer_ms.set(0);
     }
 
+    fn finalize_garbage_landing(engine: &mut CoreEngine, landed: i32) -> i32 {
+        if landed > 0 {
+            if let Some(piece) = engine.current_piece {
+                if !engine.is_position_valid(&piece, Some(piece.position), Some(piece.rotation)) {
+                    engine.game_over = true;
+                    engine.game_over_reason = Some("garbage_top_out".to_string());
+                }
+            }
+        }
+        landed
+    }
+
     fn after_piece_motion(&self) {
         self.lock_timer_ms.set(0);
     }
@@ -276,15 +288,13 @@ impl PyTetrisEngine {
     fn tick_garbage_internal(&self) -> i32 {
         let mut engine = self.inner.borrow_mut();
         let landed = engine.tick_garbage();
-        if landed > 0 {
-            if let Some(piece) = engine.current_piece {
-                if !engine.is_position_valid(&piece, Some(piece.position), Some(piece.rotation)) {
-                    engine.game_over = true;
-                    engine.game_over_reason = Some("garbage_top_out".to_string());
-                }
-            }
-        }
-        landed
+        Self::finalize_garbage_landing(&mut engine, landed)
+    }
+
+    fn apply_ready_garbage_internal(&self) -> i32 {
+        let mut engine = self.inner.borrow_mut();
+        let landed = engine.apply_ready_garbage();
+        Self::finalize_garbage_landing(&mut engine, landed)
     }
 }
 
@@ -469,6 +479,14 @@ impl PyTetrisEngine {
         self.inner
             .borrow_mut()
             .add_incoming_garbage(lines, timer, col);
+    }
+
+    fn advance_garbage_timers(&self) {
+        self.inner.borrow_mut().advance_garbage_timers();
+    }
+
+    fn apply_ready_garbage(&self) -> i32 {
+        self.apply_ready_garbage_internal()
     }
 
     fn tick_garbage(&self) -> i32 {

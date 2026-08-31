@@ -140,12 +140,19 @@ impl TetrisEngine {
         }
     }
 
-    pub fn tick_garbage(&mut self) -> i32 {
+    pub fn advance_garbage_timers(&mut self) {
+        for batch in &mut self.incoming_garbage {
+            if batch.timer > 0 {
+                batch.timer -= 1;
+            }
+        }
+    }
+
+    pub fn apply_ready_garbage(&mut self) -> i32 {
         let mut landed = 0;
         let mut still_pending = Vec::with_capacity(self.incoming_garbage.len());
         let pending = std::mem::take(&mut self.incoming_garbage);
-        for mut batch in pending {
-            batch.timer -= 1;
+        for batch in pending {
             if batch.timer <= 0 {
                 self.apply_garbage(batch.lines, batch.col);
                 landed += batch.lines;
@@ -155,6 +162,11 @@ impl TetrisEngine {
         }
         self.incoming_garbage = still_pending;
         landed
+    }
+
+    pub fn tick_garbage(&mut self) -> i32 {
+        self.advance_garbage_timers();
+        self.apply_ready_garbage()
     }
 
     fn next_garbage_hole_column(&mut self) -> u8 {
@@ -183,7 +195,7 @@ impl TetrisEngine {
 mod tests {
     use super::{GarbageBatch, PendingGarbageSummary};
     use crate::board::board_index;
-    use crate::{TetrisEngine, BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID};
+    use crate::{BOARD_HEIGHT, BOARD_WIDTH, GARBAGE_ID, TetrisEngine};
 
     fn set_board_cell(engine: &mut TetrisEngine, x: i16, y: i16, value: i8) {
         let index = board_index(x, y).expect("test coordinates must be in bounds");
@@ -323,6 +335,84 @@ mod tests {
                 landing_within_one_ply: false,
             }
         );
+    }
+
+    #[test]
+    fn advance_garbage_timers_arms_batches_without_landing() {
+        let mut engine = TetrisEngine::default();
+        let before = engine.board;
+        engine.incoming_garbage = vec![
+            GarbageBatch {
+                lines: 2,
+                timer: 1,
+                col: 3,
+            },
+            GarbageBatch {
+                lines: 1,
+                timer: 3,
+                col: 5,
+            },
+        ];
+
+        engine.advance_garbage_timers();
+
+        assert_eq!(engine.board, before);
+        assert_eq!(
+            engine.incoming_garbage,
+            vec![
+                GarbageBatch {
+                    lines: 2,
+                    timer: 0,
+                    col: 3,
+                },
+                GarbageBatch {
+                    lines: 1,
+                    timer: 2,
+                    col: 5,
+                },
+            ]
+        );
+        assert_eq!(
+            engine.get_pending_garbage_summary(),
+            PendingGarbageSummary {
+                total_lines: 3,
+                min_timer: 0,
+                max_timer: 2,
+                batch_count: 2,
+                landing_within_one_ply: true,
+            }
+        );
+    }
+
+    #[test]
+    fn apply_ready_garbage_only_lands_batches_with_zero_timer() {
+        let mut engine = TetrisEngine::default();
+        engine.incoming_garbage = vec![
+            GarbageBatch {
+                lines: 2,
+                timer: 0,
+                col: 3,
+            },
+            GarbageBatch {
+                lines: 1,
+                timer: 2,
+                col: 5,
+            },
+        ];
+
+        let landed = engine.apply_ready_garbage();
+
+        assert_eq!(landed, 2);
+        assert_eq!(
+            engine.incoming_garbage,
+            vec![GarbageBatch {
+                lines: 1,
+                timer: 2,
+                col: 5,
+            }]
+        );
+        let hole_idx = board_index(3, (BOARD_HEIGHT - 1) as i16).expect("bottom hole exists");
+        assert_eq!(engine.board[hole_idx], 0);
     }
 
     #[test]

@@ -3,9 +3,9 @@ use crate::engine::{BagRemainderCounts, PostLockPrediction, QueueSnapshot, Tetri
 use crate::garbage::{GarbageBatch, OutgoingAttackResolution, PendingGarbageSummary};
 use crate::piece::{Piece, PieceKind};
 use crate::scoring::{AttackStats, B2BMode, SpinMode, SpinResult};
-use crate::{Board, BOARD_HEIGHT, BOARD_WIDTH};
+use crate::{BOARD_HEIGHT, BOARD_WIDTH, Board};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct EngineStateFixture {

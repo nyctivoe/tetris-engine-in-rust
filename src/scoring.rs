@@ -1,5 +1,5 @@
-use crate::piece::PieceKind;
 use crate::Board;
+use crate::piece::PieceKind;
 use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,11 +191,7 @@ pub fn update_b2b_state(
         let next_surge_charge = match b2b_mode {
             B2BMode::Surge => {
                 let b2b_display = next_b2b_chain - 1;
-                if b2b_display >= 3 {
-                    b2b_display
-                } else {
-                    0
-                }
+                if b2b_display >= 3 { b2b_display } else { 0 }
             }
             B2BMode::Chaining => 0,
         };
@@ -355,8 +351,8 @@ pub(crate) fn build_attack_stats(
 #[cfg(test)]
 mod tests {
     use super::{
-        b2b_bonus_for_chain, build_attack_stats, combo_after_clear, combo_attack_down,
-        surge_segments, update_b2b_state, B2BMode, PieceKind, SpinResult,
+        B2BMode, PieceKind, SpinResult, b2b_bonus_for_chain, build_attack_stats, combo_after_clear,
+        combo_attack_down, surge_segments, update_b2b_state,
     };
     use crate::scoring::{base_attack_for_clear, classify_clear};
 

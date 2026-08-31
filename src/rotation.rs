@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::piece::{
-    piece_definition, PieceKind, I_OFFSETS, JLSTZ_OFFSETS, KICKS_180_EW, KICKS_180_NS, O_OFFSETS,
+    I_OFFSETS, JLSTZ_OFFSETS, KICKS_180_EW, KICKS_180_NS, O_OFFSETS, PieceKind, piece_definition,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

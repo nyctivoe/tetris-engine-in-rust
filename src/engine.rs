@@ -1,18 +1,18 @@
+use crate::Board;
 use crate::board::{
     board_index, cell_blocked, compute_blocks, is_position_valid as board_is_position_valid,
 };
 use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, HIDDEN_ROWS, SPAWN_X, SPAWN_Y};
 use crate::garbage::GarbageBatch;
-use crate::piece::{piece_id, piece_kind_from_id, Piece, PieceKind};
+use crate::piece::{Piece, PieceKind, piece_id, piece_kind_from_id};
 use crate::rng::EngineRng;
 use crate::rotation::{rotation_candidates, rotation_delta_from_i8};
 use crate::scoring::{
+    AttackStats, B2BMode, B2BUpdate, ClearClassification, SpinMode, SpinResult,
     b2b_bonus_for_chain as b2b_bonus_for_chain_value, base_attack_for_clear, build_attack_stats,
     classify_clear, combo_after_clear, combo_attack_down as combo_attack_down_value,
-    surge_segments as surge_segments_value, update_b2b_state, AttackStats, B2BMode, B2BUpdate,
-    ClearClassification, SpinMode, SpinResult,
+    surge_segments as surge_segments_value, update_b2b_state,
 };
-use crate::Board;
 use serde::Serialize;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -986,9 +986,8 @@ const fn kind_index(kind: PieceKind) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        kind_index, AttackStats, B2BMode, BagRemainderCounts, EndPhaseResult,
-        ExecutePlacementResult, PlacementPayload, PostLockPrediction, QueueSnapshot, SpinMode,
-        TetrisEngine,
+        AttackStats, B2BMode, BagRemainderCounts, EndPhaseResult, ExecutePlacementResult,
+        PlacementPayload, PostLockPrediction, QueueSnapshot, SpinMode, TetrisEngine, kind_index,
     };
     use crate::board::{board_index, compute_blocks, is_position_valid as board_is_position_valid};
     use crate::constants::{BOARD_HEIGHT, BOARD_WIDTH, SPAWN_X, SPAWN_Y};

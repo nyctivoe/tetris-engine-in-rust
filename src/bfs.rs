@@ -611,7 +611,7 @@ fn wrap_index(value: i16, upper: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{python_semantics_bfs, BfsResultKey, PlacementRecord};
+    use super::{BfsResultKey, PlacementRecord, python_semantics_bfs};
     use crate::board::board_index;
     use crate::{Piece, PieceKind, TetrisEngine};
 
@@ -635,14 +635,18 @@ mod tests {
         let raw = engine.bfs_all_placements(Some(&piece), true, None, false, false);
 
         assert_eq!(with_skip[0].placement, PlacementRecord::Skip);
-        assert!(without_skip
-            .iter()
-            .all(|result| result.placement != PlacementRecord::Skip));
+        assert!(
+            without_skip
+                .iter()
+                .all(|result| result.placement != PlacementRecord::Skip)
+        );
         assert_eq!(raw.len(), 34);
         assert_eq!(without_skip.len(), 17);
-        assert!(without_skip
-            .iter()
-            .all(|result| result.placements.len() == 2));
+        assert!(
+            without_skip
+                .iter()
+                .all(|result| result.placements.len() == 2)
+        );
     }
 
     #[test]
